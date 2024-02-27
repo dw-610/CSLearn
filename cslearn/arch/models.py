@@ -2031,7 +2031,6 @@ class DomainLearnerModel(tf.keras.models.Model):
             'similarity': self.sim,
             'similarity_c': self.sim_c,
             'alpha': self.alpha,
-            'beta': self.beta,
             'lambda': self.lam,
         })
         return config

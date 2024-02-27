@@ -587,7 +587,7 @@ class ImageLearningController():
                 self.models_loaded = True
                 self.encoder_loaded = True
                 self.decoder_loaded = True
-            elif 'domain_learner' in file:
+            elif 'domainLearner' in file:
                 self.model = tf.keras.models.load_model(learner_path + file)
                 self.encoder = self.model.get_layer('encoder')
                 self.decoder = self.model.get_layer('decoder')
@@ -705,7 +705,6 @@ class ImageLearningController():
         self.params['epochs'] = epochs
         self.params['steps_per_epoch'] = steps_per_epoch
         self.params['validation_steps'] = validation_steps
-        self.params['callbacks'] = callbacks
         
         # get the appropriate internal method for training the models
         if self.learner_type == 'classifier':
