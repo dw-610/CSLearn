@@ -2383,7 +2383,7 @@ class ImageLearningController():
         # main training loop
         for epoch in range(epochs):
             if verbose > 0:
-                if epoch <= warmup:
+                if epoch < warmup:
                     print(f'\n\n\nEpoch {epoch+1}/{epochs} (warmup)')
                 else:
                     print(f'\n\n\nEpoch {epoch+1}/{epochs}')
@@ -2487,9 +2487,9 @@ class ImageLearningController():
         """
         # beta is 0 during warmup stage
         if current_epoch < warmup:
-            self.model.beta = 0.0
+            self.model.beta.assign(0.0)
         elif current_epoch == warmup: 
-            self.model.beta = self.beta
+            self.model.beta.assign(self.beta)
 
         # train the model with the model's .fit method
         history = self.model.fit(

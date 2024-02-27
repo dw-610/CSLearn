@@ -1769,7 +1769,7 @@ class DomainLearnerModel(tf.keras.models.Model):
         """
         super(DomainLearnerModel, self).compile(**kwargs)
         self.alpha = alpha
-        self.beta = beta
+        self.beta = tf.Variable(beta, trainable=False)
         self.lam = lam
  
     def call(self, x, training=False):
