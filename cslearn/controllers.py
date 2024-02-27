@@ -705,7 +705,6 @@ class ImageLearningController():
         self.params['epochs'] = epochs
         self.params['steps_per_epoch'] = steps_per_epoch
         self.params['validation_steps'] = validation_steps
-        self.params['callbacks'] = callbacks
         
         # get the appropriate internal method for training the models
         if self.learner_type == 'classifier':
