@@ -2260,7 +2260,6 @@ class ImageLearningController():
             alpha: float,
             beta: float,
             lam: float,
-            gamma: float,
             metrics: list,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
             **kwargs
@@ -2488,9 +2487,9 @@ class ImageLearningController():
         """
         # beta is 0 during warmup stage
         if current_epoch < warmup:
-            self.model.beta.assign(0.0)
+            self.model.beta = 0.0
         elif current_epoch == warmup: 
-            self.model.beta.assign(self.beta)
+            self.model.beta = self.beta
 
         # train the model with the model's .fit method
         history = self.model.fit(
