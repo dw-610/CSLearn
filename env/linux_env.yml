@@ -1,0 +1,14 @@
+name: cslearn-env
+channels:
+  - conda-forge
+  - anaconda
+  - defaults
+dependencies:
+  - python=3.10.12
+  - matplotlib
+  - ipykernel
+  - pip
+  - pip:
+      - tensorflow[and-cuda]
+      - opencv-python
+      - comet-ml
