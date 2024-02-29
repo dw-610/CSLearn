@@ -1004,12 +1004,13 @@ class ImageLearningController():
             return
         elif which == 'validation':
             loader = self.eval_loader
+            set_size = self.valid_size
 
         # get the features and labels from the data loader
         if self.latent_dim == 2:
             features = np.empty((0,2))
             labels = np.empty((0, self.number_of_properties))
-            print('Computing features...')
+            total = 0
             for batch_data, batch_labels in loader:
                 batch_features = self.encoder.predict(batch_data, verbose=0)
                 if self.autoencoder_type == 'variational':
@@ -1018,7 +1019,9 @@ class ImageLearningController():
                         )(batch_features)[2]
                 features = np.append(features, batch_features, axis=0)
                 labels = np.append(labels, batch_labels, axis=0)
-            print('Done.')
+                total += len(batch_labels)
+                print(f'\rComputing features ({total}/{set_size})', end='')
+            print('\nDone.')
         if self.latent_dim == 3:
             features = np.empty((0,3))
             labels = np.empty((0, self.number_of_properties))
@@ -1031,7 +1034,9 @@ class ImageLearningController():
                         )(batch_features)[2]
                 features = np.append(features, batch_features, axis=0)
                 labels = np.append(labels, batch_labels, axis=0)
-            print('Done.')
+                total += len(batch_labels)
+                print(f'\rComputing features ({total}/{set_size})', end='')
+            print('\nDone.')
 
         # pass to the method for plotting the features
         vis.plot_scattered_features(
@@ -1349,8 +1354,9 @@ class ImageLearningController():
             return
         
         # get the encoded features
-        print('Computing features...')
         features = np.empty((0, self.latent_dim))
+        set_size = self.valid_size
+        total = 0
         for batch_data, _ in self.validation_loader:
             batch_features = self.encoder.predict(batch_data, verbose=0)
             if self.autoencoder_type == 'variational':
@@ -1358,6 +1364,9 @@ class ImageLearningController():
                     latent_dim=self.latent_dim
                 )(batch_features)[2]
             features = np.append(features, batch_features, axis=0)
+            total += len(batch_data)
+            print(f'\rComputing features ({total}/{set_size})', end='')
+        print('\nDone.')
 
         # get min and max vals if not entered
         if min_val is None:
@@ -1432,8 +1441,9 @@ class ImageLearningController():
             return
         
         # get the encoded features
-        print('Computing features...')
         features = np.empty((0, self.latent_dim))
+        set_size = self.valid_size
+        total = 0
         for batch_data, _ in self.validation_loader:
             batch_features = self.encoder.predict(batch_data, verbose=0)
             if self.autoencoder_type == 'variational':
@@ -1441,6 +1451,9 @@ class ImageLearningController():
                     latent_dim=self.latent_dim
                 )(batch_features)[2]
             features = np.append(features, batch_features, axis=0)
+            total += len(batch_data)
+            print(f'\rComputing features ({total}/{set_size})', end='')
+        print('\nDone.')
 
         vis.visualize_all_dimensions(
             features=features,
