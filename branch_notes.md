@@ -20,5 +20,14 @@ Goal progression:
 - Will continue with trying to impliment this gradient methods
     - Essentially, compute the gradient $\partial W_p^p / \partial h(x)$ as in the paper
     - Then use this to back prop over all the other parameters, using the automatic gradients computed for $\partial h(x)/ \partial \theta$
+- It works!
+    - Implemented the MNIST experiment from the Frogner paper, with numerical distance as the grounding metric
+    - Trained a classifier using the custom gradient method mentioned above
+    - The resulting feature maps smoothly transitions from 0 to 1 to ... to 9
+- *Challenges*
+    - The implementation I am using right now requires a custom training loop, i.e. it is not using model.fit()
+        - Thus, it is not readily compatible with the current CSLearn setup
+    - The magnitude of the distances in $\textbf{M}$ affects the stability of the training, as well as the magnitude of $\lambda$
+        - Large $\lambda$ seemed to cause instability, as well as large elements of $\textbf{M}$
 
 
