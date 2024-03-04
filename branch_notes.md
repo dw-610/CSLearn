@@ -14,5 +14,11 @@ Goal progression:
     - Implement the loss in a custom function
     - Feed this function to the keras workflow to use it for training
 #### Notes:
+- First attempt: try to just impliment the iterative loss computation in a custom loss function that is passed to model.compile
+    - This may have cause issues with the gradients? Not sure
+    - Not applicable (directly) - Frogner paper only gives algorithm for computing the *gradient*, not the loss itself
+- Will continue with trying to impliment this gradient methods
+    - Essentially, compute the gradient $\partial W_p^p / \partial h(x)$ as in the paper
+    - Then use this to back prop over all the other parameters, using the automatic gradients computed for $\partial h(x)/ \partial \theta$
 
 
