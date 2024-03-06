@@ -52,6 +52,8 @@ class ImageLearningController():
     buffer_size = 10000         # Buffer size for training
     autoencoder_type = 'standard' # Type of autoencoder to use
 
+    wass_train = False          # Whether to use the Wasserstein loss
+
     debug_mode = False          # Whether to use the debug mode
     use_gpu = True              # Whether to use the GPU for model training
 
@@ -102,7 +104,7 @@ class ImageLearningController():
 
         if debug:
             self.debug_mode = True
-            tf.config.experimental_run_functions_eagerly(True)
+            tf.config.run_functions_eagerly(True)
 
         if not use_gpu:
             self.use_gpu = False
@@ -411,7 +413,9 @@ class ImageLearningController():
             sch_init_lr: Optional[float] = 1e-4,
             sch_decay_steps: Optional[int] = 10000,
             sch_warmup_target: Optional[float] = None,
-            sch_warmup_steps: Optional[int] = None
+            sch_warmup_steps: Optional[int] = None,
+            metric_matrix: Optional[np.ndarray] = None,
+            wasserstein_lam: Optional[float] = 1.0
         ):
         """
         Method for compiling the models. This method should be called after
@@ -421,7 +425,8 @@ class ImageLearningController():
         ----------
         loss : str, optional
             The loss function to use for training.
-            Options for 'classifier' are 'categorical_crossentropy'.
+            Options for 'classifier' are 'categorical_crossentropy', 
+                'wasserstein'.
             Options for 'autoencoder' are 'mse' or 'ssim'.
             Domain learner uses a custom loss function, so this parameter is
             ignored.
@@ -478,6 +483,13 @@ class ImageLearningController():
             The number of steps for the warmup phase.
             Only used if 'schedule' is 'cosine'.
             Default is 1000.
+        metric_matrix : np.ndarray, optional
+            The matrix of distances between the classes.
+            Only used for the Wasserstein loss.
+            Default is None.
+        wasserstein_lam : float, optional
+            The balancing parameter for the Wasserstein loss.
+            Default is 1.0.
         """
         # check that the models have been created or loaded
         assert self.models_created or self.models_loaded, \
@@ -534,7 +546,9 @@ class ImageLearningController():
             alpha=alpha,
             beta=beta,
             lam=lam,
-            schedule=schedule
+            schedule=schedule,
+            metric_matrix=metric_matrix,
+            wasserstein_lam=wasserstein_lam
         )
 
         # set flag to indicate that models have been compiled
@@ -1794,25 +1808,13 @@ class ImageLearningController():
             global_pool_type=global_pool_type,
             dropout=dropout
         )
-        
-        # create the classifier
-        inputs = tf.keras.Input(shape=(self.height, self.width, self.channels))
 
-        if use_awgn:
-            x = layers.AWGNLayer(variance=awgn_variance)(inputs)
-            x = encoder(x)
-        else:
-            x = encoder(inputs)
-
-        x = tf.keras.layers.Dense(
-            units=self.number_of_properties,
-            activation=output_activation,
-            use_bias=False
-        )(x)
-
-        classifier = tf.keras.Model(
-            inputs=inputs,
-            outputs=x,
+        classifier = models.Classifier(
+            num_classes=self.number_of_properties,
+            encoder=encoder,
+            output_activation=output_activation,
+            use_awgn=use_awgn,
+            awgn_variance=awgn_variance,
             name='classifier'
         )
 
@@ -2175,14 +2177,22 @@ class ImageLearningController():
             clipvalue: float,
             metrics: list,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
+            metric_matrix: np.ndarray,
+            wasserstein_lam: float,
             **kwargs
         ):
 
         # set the loss based on the provided string
         if loss == 'categorical_crossentropy':
             loss = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
+        elif loss == 'wasserstein':
+            self.wass_train = True
+            if metric_matrix is None:
+                raise ValueError(
+                    "Must provide a metric matrix for Wasserstein loss."
+                )
         else:
-            raise ValueError("Got invalid loss function.")
+            raise ValueError(f"Got invalid loss function: {loss}.")
         
         # set the optimizer based on the provided string
         if optimizer == 'adam':
@@ -2193,13 +2203,15 @@ class ImageLearningController():
                 clipvalue=clipvalue
             )
         else:
-            raise ValueError("Got invalid optimizer.")
+            raise ValueError(f"Got invalid optimizer: {optimizer}.")
 
         # compile the model with the model's .compile method
         self.model.compile(
             loss=loss,
             optimizer=optimizer,
-            metrics=metrics
+            metrics=metrics,
+            metric_matrix=metric_matrix,
+            wasserstein_lam=wasserstein_lam
         )
 
         # set flag to indicate that models have been compiled
