@@ -29,5 +29,12 @@ Goal progression:
         - Thus, it is not readily compatible with the current CSLearn setup
     - The magnitude of the distances in $\textbf{M}$ affects the stability of the training, as well as the magnitude of $\lambda$
         - Large $\lambda$ seemed to cause instability, as well as large elements of $\textbf{M}$
+            - Can fix this by scaling the elements of $\textbf{M}$
+
+### 03/06/24
+#### To do:
+- Integrate Wasserstein loss as an option when training classifiers in CSLearn
+    - If Wasserstein is specified, use a custom-defined training loop, else use model.fit() (can retrofit later so that all training methods are consistent, with the custom training loop)
+    - Pass training-specified parameters to the compile method (Metric matrix, required for Wasserstein, and the lambda balancing parameter)
 
 
