@@ -1560,6 +1560,122 @@ class ResNet101Encoder(tf.keras.models.Model):
 # ------------------------------------------------------------------------------
 
 
+class Classifier(tf.keras.models.Model):
+    """
+    This class defines a simple classifier model, based on a predefined encoder
+    model.
+    """
+    def __init__(
+            self,
+            num_classes: int,
+            encoder: tf.keras.models.Model,
+            output_activation: str = 'linear',
+            use_awgn: bool = False,
+            awgn_variance: float = 1.0,
+            **kwargs
+        ):
+        """
+        Constructor method for the Classifier class.
+
+        Parameters
+        ----------
+        num_classes : int
+            The number of classes in the classification problem.
+        encoder : tf.keras.models.Model
+            The encoder model to use for feature extraction.
+        output_activation : str, optional
+            The activation function to use for the output layer.
+            Default value is 'linear'.
+        use_awgn : bool, optional
+            Whether to use additive white Gaussian noise (AWGN) in the model.
+            Default value is False.
+        awgn_variance : float, optional
+            The variance of the AWGN to use, if enabled.
+            Default value is 1.0.
+        """
+        super(Classifier, self).__init__()
+
+        self.num_classes = num_classes
+        self.op_act = output_activation
+        self.use_awgn = use_awgn
+        self.awgn_variance = awgn_variance
+
+        if use_awgn:
+            self.awgn_layer = AWGNLayer(awgn_variance)
+        else:
+            self.awgn_layer = None
+
+        self.encoder = encoder
+
+        self.dense_layer = layers.Dense(
+            num_classes, 
+            activation=output_activation,
+            use_bias=False
+        )
+        
+    def compile(
+            self,
+            loss: Optional[Union[str, tf.keras.losses.Loss]] = None,
+            metric_matrix: Optional[np.array] = None,
+            wasserstein_lam: Optional[float] = 1.0,
+            **kwargs
+        ):
+        """
+        Function for compiling the Classifier object. Accepts the same 
+        parameters as the tf.keras.models.Model.compile function, with the 
+        addition of the metric_matrix and wasserstein_lam parameters.
+
+        Parameters
+        ----------
+        loss : str or tf.keras.losses.Loss, optional
+            The loss function to use for training.
+            Currently, the only str accepted is 'wasserstein'.
+            For traditional losses, use the tf.keras.losses.Loss objects.
+            Default value is None.
+        metric_matrix : numpy.array, optional
+            The metric matrix to use for the Wasserstein loss.
+            Required if using the Wasserstein loss.
+            Default value is None.
+        wasserstein_lam : float, optional
+            The lambda value to use for the Wasserstein loss.
+            Default value is 1.0.
+        """
+        super(Classifier, self).compile(
+            **kwargs,
+            loss=loss if type(loss) is not str else None
+        )
+        if loss == 'wasserstein':
+            if metric_matrix is not None:
+                self.metric_matrix = tf.Variable(metric_matrix)
+            else:
+                raise ValueError(
+                    "Must provide a metric matrix for the Wasserstein loss."
+                )
+            self.wasserstein_lam = wasserstein_lam
+
+    def call(self, inputs, training=False):
+        if self.use_awgn:
+            x = self.awgn_layer(inputs, training=training)
+            x = self.encoder(x, training=training)
+        else:
+            x = self.encoder(inputs, training=training)
+        x = self.dense_layer(x, training=training)
+        return x
+
+    def get_config(self):
+        config = super(Classifier, self).get_config()
+        config.update({
+            'num_classes': self.num_classes,
+            'output_activation': self.op_act,
+            'use_awgn': self.use_awgn,
+            'awgn_variance': self.awgn_variance,
+        })
+        return config
+
+
+# ------------------------------------------------------------------------------
+
+
 class Autoencoder(tf.keras.models.Model):
     """
     This class defines a general end-to-end autoencoder model by taking in an 
