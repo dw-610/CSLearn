@@ -9,42 +9,58 @@ Wasserstein loss training methods.
 import numpy as np
 import tensorflow as tf
 
+from tqdm import tqdm
+
 from .arch.grads import wasserstein_grad
 
 # ------------------------------------------------------------------------------
 
-def get_data():
+def get_data(dataset: str = 'mnist'):
     """
-    Function for loading in MNIST data.
+    Function for loading in MNIST or CIFAR-10 data.
     """
 
-    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    if dataset == 'mnist':
+        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    elif dataset == 'cifar10':
+        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+    else:
+        raise ValueError('Invalid dataset name.')
 
-    x_train = np.expand_dims(x_train,-1).astype('float32') / 255
-    x_test = np.expand_dims(x_test,-1).astype('float32') / 255
+    if dataset == 'mnist':
+        x_train = np.expand_dims(x_train,-1).astype('float32') / 255
+        x_test = np.expand_dims(x_test,-1).astype('float32') / 255
+    else:
+        x_train = x_train.astype('float32') / 255
+        x_test = x_test.astype('float32') / 255
 
     x_train = 2*x_train - 1
     x_test = 2*x_test - 1
 
-    y_train = tf.one_hot(y_train, 10)
-    y_test = tf.one_hot(y_test, 10)
+    y_train = tf.one_hot(np.squeeze(y_train), 10)
+    y_test = tf.one_hot(np.squeeze(y_test), 10)
 
     return (x_train, y_train), (x_test, y_test)
 
 # ------------------------------------------------------------------------------
 
-def get_model():
+def get_model(dataset: str = 'mnist'):
     """
-    Function for creating a basic CNN model for MNIST.
+    Function for creating a basic CNN model for MNIST or CIFAR-10.
     """
 
-    input_shape = (28, 28, 1)
+    if dataset == 'mnist':
+        input_shape = (28, 28, 1)
+    elif dataset == 'cifar10':
+        input_shape = (32, 32, 3)
+    else:
+        raise ValueError('Invalid dataset name.')
     num_classes = 10
 
     inputs = tf.keras.Input(shape=input_shape)
-    x = tf.keras.layers.Conv2D(16, (3, 3), activation='relu')(inputs)
+    x = tf.keras.layers.Conv2D(64, (3, 3), activation='relu')(inputs)
     x = tf.keras.layers.MaxPooling2D((2, 2))(x)
-    x = tf.keras.layers.Conv2D(32, (3,3), activation='relu')(x)
+    x = tf.keras.layers.Conv2D(128, (3,3), activation='relu')(x)
     x = tf.keras.layers.MaxPooling2D((2,2))(x)
     x = tf.keras.layers.Flatten()(x)
     enc_out = tf.keras.layers.Dense(2, activation='linear')(x)
@@ -52,6 +68,8 @@ def get_model():
     encoder = tf.keras.models.Model(inputs=inputs, outputs=enc_out)
 
     x = encoder(inputs)
+    x = tf.keras.layers.Dense(32, activation='relu')(x)
+    x = tf.keras.layers.Dense(32, activation='relu')(x)
     outputs = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
 
     model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
@@ -105,3 +123,81 @@ def test_step(model, inputs, outputs):
 
 # ------------------------------------------------------------------------------
 
+def train_model(epochs, batch_size, model, optimizer, x_trn, y_trn, x_tst, y_tst, lam, Kmat):
+    """
+    Function for training the model with the custom Wasserstein loss.
+    """
+    for epoch in range(epochs):
+        print(f'\nEpoch: {epoch+1}/{epochs}')
+        # b = 1
+        for i in tqdm(range(0, len(x_trn), batch_size), desc='Batches',
+                      ncols=80):
+            if i+batch_size > len(x_trn):
+                x_batch = x_trn[i:]
+                y_batch = y_trn[i:]
+            else:
+                x_batch = x_trn[i:i+batch_size]
+                y_batch = y_trn[i:i+batch_size]
+            pred = train_step(model, optimizer, x_batch, y_batch, lam, Kmat)
+            if tf.reduce_any(tf.math.is_nan(pred)):
+                print('NaN prediction detected.')
+                break
+            # print(f'\rBatch {b}/{len(x_trn)//batch_size + 1}', end='')
+            # b += 1
+        # print()
+        # print('Evaluating model...')
+        acc = test_step(model, x_tst, y_tst)
+        acc = np.round(acc.numpy()*100, 2)
+        print(f'Validation accuracy: {acc:.2f}%')
+
+# ------------------------------------------------------------------------------
+
+def plot_features(features, labels, legend: list):
+    """
+    Function for plotting the 2D feature space.
+    """
+    import matplotlib.pyplot as plt
+
+    labels = np.argmax(labels, axis=-1)
+
+    for i in range(10):
+        plt.scatter(
+            features[labels==i,0],
+            features[labels==i,1],
+            s=10,
+            label=legend[i]
+        )
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# ------------------------------------------------------------------------------
+    
+def confirm_metric(M):
+    dim = M.shape[0]
+
+    # distance should be 0 iff the points are the same
+    for i in range(dim):
+        for j in range(dim):
+            if i==j and M[i,i] != 0:
+                raise ValueError('Diagonal elements should be 0.')
+            if i!=j and M[i,j] == 0:
+                raise ValueError('Off-diagonal elements should be non-zero.')
+        
+    # non-negativity and symmetry
+    for i in range(dim):
+        for j in range(dim):
+            if M[i,j] < 0:
+                raise ValueError('Non-negativity not satisfied.')
+            if M[i,j] != M[j,i]:
+                raise ValueError('Symmetry not satisfied.')
+
+    # triangle inequality
+    for i in range(dim):
+        for j in range(dim):
+            for k in range(dim):
+                    if M[i,j] + M[j,k] < M[i,k]:
+                        raise ValueError('Triangle inequality not satisfied.')
+    return True
+
+# ------------------------------------------------------------------------------
