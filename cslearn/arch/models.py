@@ -1618,6 +1618,7 @@ class Classifier(tf.keras.models.Model):
             loss: Optional[Union[str, tf.keras.losses.Loss]] = None,
             metric_matrix: Optional[np.array] = None,
             wasserstein_lam: Optional[float] = 1.0,
+            wasserstein_p: Optional[float] = 1.0,
             **kwargs
         ):
         """
@@ -1639,19 +1640,23 @@ class Classifier(tf.keras.models.Model):
         wasserstein_lam : float, optional
             The lambda value to use for the Wasserstein loss.
             Default value is 1.0.
+        wasserstein_p : float, optional
+            The p value to use for the Wasserstein loss.
+            Default value is 1.0.
         """
-        super(Classifier, self).compile(
-            **kwargs,
-            loss=loss if type(loss) is not str else None
-        )
         if loss == 'wasserstein':
             if metric_matrix is not None:
-                self.metric_matrix = tf.Variable(metric_matrix)
+                self.metric_matrix = tf.Variable(metric_matrix, trainable=False)
             else:
                 raise ValueError(
                     "Must provide a metric matrix for the Wasserstein loss."
                 )
             self.wasserstein_lam = wasserstein_lam
+            self.wasserstein_p = wasserstein_p
+        super(Classifier, self).compile(
+            **kwargs,
+            loss=loss if type(loss) is not str else None
+        )
 
     def call(self, inputs, training=False):
         if self.use_awgn:
