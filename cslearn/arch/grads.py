@@ -46,7 +46,7 @@ def wasserstein_grad(y_true, y_pred, lam: float = 1.0, Kmat: tf.Tensor = None):
         x = tf.matmul(u, Kmat)
         x = tf.divide(y_true, x + 1e-16)
         x = tf.matmul(x, tf.transpose(Kmat))
-        u = tf.divide(y_pred, x + 1e-16)
+        u = tf.divide(y_pred, x + 1e-16) + 1e-16
         diff = tf.reduce_max(tf.reduce_sum(tf.square(u - u_),axis=-1))
 
     term1 = tf.math.log(u)/lam
