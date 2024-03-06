@@ -37,4 +37,12 @@ Goal progression:
     - If Wasserstein is specified, use a custom-defined training loop, else use model.fit() (can retrofit later so that all training methods are consistent, with the custom training loop)
     - Pass training-specified parameters to the compile method (Metric matrix, required for Wasserstein, and the lambda balancing parameter)
 
+#### Notes:
+- Integrated Wassertain loss-based training into the classifier model of CSLearn
+    - specify loss as 'wasserstein' when calling compile_learner
+    - Pass the metric matrix and (optionally) $\lambda$ and $p$ to compile_learner
+    - Automatically tracks the accuracy and saves it to the .history attribute
+    - As no loss is computed, loss is not tracked
+    - Can use the typical eval_ methods for the classifier (not eval_plot_loss)
+
 
