@@ -31,6 +31,7 @@ from contextlib import nullcontext
 from . import feeders
 from . import utilities as utils
 from . import visualization as vis
+from . import training as cstrain
 from .arch import models, layers
 
 # ------------------------------------------------------------------------------
@@ -343,13 +344,14 @@ class ImageLearningController():
         assert latent_activation in ['relu', 'selu', 'gelu', 'linear'], \
             "Latent activation must be one of 'relu', 'selu', 'gelu', or \
                 'linear'."
-        assert output_activation in ['linear', 'sigmoid'], \
-            "Output activation must be one of 'linear' or 'sigmoid'."
+        assert output_activation in ['linear', 'sigmoid', 'softmax'], \
+            "Output activation must be one of 'linear','sigmoid', or 'softmax'."
 
         # save off important values as attributes
         self.latent_dim = latent_dim
         self.architecture = architecture
         self.autoencoder_type = autoencoder_type
+        self.output_activation = output_activation
         if self.learner_type == 'domain_learner':
             self.distance = distance
             self.similarity = similarity
@@ -415,7 +417,8 @@ class ImageLearningController():
             sch_warmup_target: Optional[float] = None,
             sch_warmup_steps: Optional[int] = None,
             metric_matrix: Optional[np.ndarray] = None,
-            wasserstein_lam: Optional[float] = 1.0
+            wasserstein_lam: Optional[float] = 1.0,
+            wasserstein_p: Optional[float] = 1.0
         ):
         """
         Method for compiling the models. This method should be called after
@@ -490,6 +493,10 @@ class ImageLearningController():
         wasserstein_lam : float, optional
             The balancing parameter for the Wasserstein loss.
             Default is 1.0.
+        wasserstein_p : float, optional
+            The exponent for the distance metric in the Wasserstein loss.
+            To get a valid metric, this should be >= 1.
+            Default is 1.0.
         """
         # check that the models have been created or loaded
         assert self.models_created or self.models_loaded, \
@@ -548,7 +555,8 @@ class ImageLearningController():
             lam=lam,
             schedule=schedule,
             metric_matrix=metric_matrix,
-            wasserstein_lam=wasserstein_lam
+            wasserstein_lam=wasserstein_lam,
+            wasserstein_p=wasserstein_p
         )
 
         # set flag to indicate that models have been compiled
@@ -2179,6 +2187,7 @@ class ImageLearningController():
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
             metric_matrix: np.ndarray,
             wasserstein_lam: float,
+            wasserstein_p: float,
             **kwargs
         ):
 
@@ -2190,6 +2199,12 @@ class ImageLearningController():
             if metric_matrix is None:
                 raise ValueError(
                     "Must provide a metric matrix for Wasserstein loss."
+                )
+            # make sure the output act is softmax
+            if self.output_activation != 'softmax':
+                raise ValueError(
+                    "output_activation (set with .create_learner) must be" + \
+                    " 'softmax' for Wasserstein loss."
                 )
         else:
             raise ValueError(f"Got invalid loss function: {loss}.")
@@ -2211,7 +2226,8 @@ class ImageLearningController():
             optimizer=optimizer,
             metrics=metrics,
             metric_matrix=metric_matrix,
-            wasserstein_lam=wasserstein_lam
+            wasserstein_lam=wasserstein_lam,
+            wasserstein_p=wasserstein_p
         )
 
         # set flag to indicate that models have been compiled
@@ -2326,19 +2342,30 @@ class ImageLearningController():
             **kwargs
         ):
         
-        # train the model with the model's .fit method
-        history = self.model.fit(
-            x=self.training_loader,
-            epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
-            validation_data=self.validation_loader,
-            validation_steps=validation_steps,
-            callbacks=callbacks,
-            verbose=verbose
-        )
-
-        # save the training history dictionary as an attribute
-        self.training_history = history.history
+        if not self.wass_train:
+            # train the model with the model's .fit method
+            history = self.model.fit(
+                x=self.training_loader,
+                epochs=epochs,
+                steps_per_epoch=steps_per_epoch,
+                validation_data=self.validation_loader,
+                validation_steps=validation_steps,
+                callbacks=callbacks,
+                verbose=verbose
+            )
+            self.training_history = history.history
+        else:
+            history = cstrain.wasserstein_classifier_train_loop(
+                model=self.model,
+                optimizer=self.model.optimizer,
+                training_loader=self.training_loader,
+                validation_loader=self.validation_loader,
+                epochs=epochs,
+                batch_size=self.batch_size,
+                train_size=self.train_size,
+                valid_size=self.valid_size
+            )
+            self.training_history = history
 
         # set flag to indicate that models have been trained
         self.models_trained = True
