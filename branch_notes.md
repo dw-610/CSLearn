@@ -45,4 +45,39 @@ Goal progression:
     - As no loss is computed, loss is not tracked
     - Can use the typical eval_ methods for the classifier (not eval_plot_loss)
 
+### 03/07/24
+#### To do:
+- Integrate Wasserstein loss as an option when training the domain learner
+    - Idea is that the loss function now looks like this: $$ \mathcal{L} = \alpha \ell_r + \beta \ell_W $$ where $$ \ell_W = W_p^p - \lambda H $$
+    - Note that the Frogner paper uses $1/\lambda$ for the regularization - to be consistent with other domain learner approaches, we want to use just $\lambda$ as a greater value should *increase* regularization/smoothing
+    - Should be able to create a custom training loop where updates are done with something like
+    ```python
+    r_grads = tape.gradient(reconstructed, model.trainable_variables, output_gradients=dlr_dx)
+    w_grads = tape.graident(predictions, model.trainable_variables, output_gradients=dlw_dx)
+    grads = alpha*r_grads + beta*w_grads
+    ```
+- Do some testing with the new framework
 
+#### Notes:
+- Added wasserstein option to domain learner framework
+    - Right now, not updating M from the prototypes
+        - Need to do this when M isn't provided
+    - Need to clean up the code a bit
+        - Figure out the best way to handle all of the training functions
+            - Standalone functions as they are now?
+            - Collected in a "trainer" object?
+- Preliminary tests (MNIST) seem to confirm that it is working correctly
+    - With $\alpha = 0.01$ and $\beta = 100.0$, the feature space seems "mixed" between the Wasserstein-only and the autoencoder-only
+    - With $\alpha = 0.0$, it learns the "semi-circle" shape similar to first tests for Wasserstein classifier 
+    - With $\beta = 0.0$, it learns the more mixed up representations typical from the autoencoder
+- For now, have just kept the regularization parameter as $1/\lambda$
+
+### 03/08/24
+#### To do:
+- Clean up code
+    - Refactor the custom training loops
+        - Create a "trainer" object
+            - methods for gradient computations
+            - train_step and test_step methods
+            - "fit" method for performing the training loop
+            
