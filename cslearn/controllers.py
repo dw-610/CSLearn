@@ -431,8 +431,7 @@ class ImageLearningController():
             Options for 'classifier' are 'categorical_crossentropy', 
                 'wasserstein'.
             Options for 'autoencoder' are 'mse' or 'ssim'.
-            Domain learner uses a custom loss function, so this parameter is
-            ignored.
+            Options for 'domain_learner' are 'basic' or 'wasserstein'
             Default is 'mse'.
         optimizer : str, optional
             The optimizer to use for training.
@@ -489,6 +488,8 @@ class ImageLearningController():
         metric_matrix : np.ndarray, optional
             The matrix of distances between the classes.
             Only used for the Wasserstein loss.
+            For the domain_learner, if None, the matrix is dynamically computed
+            from the prototypes learned during training.
             Default is None.
         wasserstein_lam : float, optional
             The balancing parameter for the Wasserstein loss.
@@ -2292,6 +2293,7 @@ class ImageLearningController():
     
     def _compile_semantic_learner(
             self,
+            loss: str,
             optimizer: str,
             learning_rate: float,
             weight_decay: float,
@@ -2302,8 +2304,15 @@ class ImageLearningController():
             lam: float,
             metrics: list,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
+            metric_matrix: np.ndarray,
+            wasserstein_lam: float,
+            wasserstein_p: float,
             **kwargs
         ):
+
+        # check if wasserstein loss is being used
+        if loss == 'wasserstein':
+            self.wass_train = True
 
         # set the optimizer based on the provided string
         if optimizer == 'adam':
@@ -2319,11 +2328,15 @@ class ImageLearningController():
         # compile the model with the model's .compile method
         if self.learner_type == 'domain_learner':
             self.model.compile(
+                loss=loss,
                 optimizer=optimizer,
                 alpha=alpha,
                 beta=beta,
                 lam=lam,
-                metrics=metrics
+                metrics=metrics,
+                metric_matrix=metric_matrix,
+                wasserstein_lam=wasserstein_lam,
+                wasserstein_p=wasserstein_p
             )
         else:
             raise ValueError("Invalid learner type.")
@@ -2414,6 +2427,100 @@ class ImageLearningController():
             **kwargs
         ):
 
+        if self.wass_train:
+            history = cstrain.wasserstein_domain_learner_train_loop(
+                model=self.model,
+                encoder=self.encoder,
+                optimizer=self.model.optimizer,
+                training_loader=self.training_loader,
+                validation_loader=self.validation_loader,
+                epochs=epochs,
+                batch_size=self.batch_size,
+                train_size=self.train_size,
+                valid_size=self.valid_size,
+                warmup=warmup,
+                mu=mu,
+                proto_update_step_size=proto_update_step_size,
+                number_of_properties=self.number_of_properties,
+                latent_dim=self.latent_dim,
+            )
+            self.prototypes = self.model.protos.numpy()
+            self.training_history = history
+        else:
+            self._domain_learner_basic_train_loop(
+                epochs=epochs,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
+                callbacks=callbacks,
+                verbose=verbose,
+                proto_update_type=proto_update_type,
+                proto_update_step_size=proto_update_step_size,
+                mu=mu,
+                warmup=warmup,
+                proto_plot_save_path=proto_plot_save_path,
+                proto_plot_colors=proto_plot_colors,
+                proto_plot_legend=proto_plot_legend
+            )
+
+        # set flag to indicate that models have been trained
+        self.models_trained = True
+
+
+    def _setup_comet_experiment(
+            self,
+            log_experiment: bool
+        ):
+        """
+        Method for setting up the comet ML experiment context (or lack thereof).
+        """
+        # if logging is specified, set up the experiment context
+        if log_experiment:
+            if comet_imported == True:
+                # load in the comet information
+                try:
+                    with open('comet_info.json', 'r') as f:
+                        comet_info = json.load(f)
+                except:
+                    raise ValueError("Could not load comet info from " \
+                        + "'comet_info.json'.")
+
+                experiment = Experiment(
+                    api_key = comet_info['API_KEY'],
+                    project_name = comet_info['PROJECT'],
+                    workspace = comet_info['WORKSPACE'],
+                    auto_metric_step_rate = 100,
+                    auto_histogram_epoch_rate=10,
+                    auto_histogram_weight_logging = False,
+                    auto_histogram_gradient_logging = False,
+                    auto_histogram_activation_logging = False
+                )
+                training_context = experiment.train()
+            else:
+                training_context = nullcontext()
+        # otherwise, just use a null context
+        else:
+            training_context = nullcontext()
+
+        return training_context
+
+    def _domain_learner_basic_train_loop(
+            self,
+            epochs: int,
+            steps_per_epoch: Optional[int] = None,
+            validation_steps: Optional[int] = None,
+            callbacks: Optional[list] = None,
+            verbose: Optional[int] = 1,
+            proto_update_type: Optional[str] = 'average',
+            proto_update_step_size: Optional[int] = 100,
+            mu: Optional[float] = 0.1,
+            warmup: Optional[int] = 0,
+            proto_plot_save_path: Optional[str] = None,
+            proto_plot_colors: Optional[list] = None,
+            proto_plot_legend: Optional[list] = None
+        ):
+        """
+        Internal method for training the domain learner model.
+        """
         self.training_history = {}
 
         # initialize the prototype plotter, if specified
@@ -2476,52 +2583,9 @@ class ImageLearningController():
                     batches=proto_update_step_size,
                     verbose=True if verbose==1 else False
                 )
-
                 # save the prototype plots, if specified
                 if prototype_plotter is not None:
                     prototype_plotter.update_and_save(self.prototypes)
-
-        # set flag to indicate that models have been trained
-        self.models_trained = True
-
-
-    def _setup_comet_experiment(
-            self,
-            log_experiment: bool
-        ):
-        """
-        Method for setting up the comet ML experiment context (or lack thereof).
-        """
-        # if logging is specified, set up the experiment context
-        if log_experiment:
-            if comet_imported == True:
-                # load in the comet information
-                try:
-                    with open('comet_info.json', 'r') as f:
-                        comet_info = json.load(f)
-                except:
-                    raise ValueError("Could not load comet info from " \
-                        + "'comet_info.json'.")
-
-                experiment = Experiment(
-                    api_key = comet_info['API_KEY'],
-                    project_name = comet_info['PROJECT'],
-                    workspace = comet_info['WORKSPACE'],
-                    auto_metric_step_rate = 100,
-                    auto_histogram_epoch_rate=10,
-                    auto_histogram_weight_logging = False,
-                    auto_histogram_gradient_logging = False,
-                    auto_histogram_activation_logging = False
-                )
-                training_context = experiment.train()
-            else:
-                training_context = nullcontext()
-        # otherwise, just use a null context
-        else:
-            training_context = nullcontext()
-
-        return training_context
-
 
     def _domain_learner_update_model(
             self,
