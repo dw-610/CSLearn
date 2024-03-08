@@ -1862,9 +1862,13 @@ class DomainLearnerModel(tf.keras.models.Model):
 
     def compile(
             self,
+            loss: Optional[str] = None,
             alpha: float = 1.0,
             beta: float = 1.0,
             lam: float = 0.001,
+            metric_matrix: Optional[np.array] = None,
+            wasserstein_lam: float = 1.0,
+            wasserstein_p: float = 1.0,
             **kwargs
         ):
         """
@@ -1888,10 +1892,31 @@ class DomainLearnerModel(tf.keras.models.Model):
         other arguments
             Other arguments to pass to tf.keras.models.Model.compile().
         """
-        super(DomainLearnerModel, self).compile(**kwargs)
         self.alpha = alpha
+        self.beta_val = beta
         self.beta = tf.Variable(beta, trainable=False)
-        self.lam = lam
+
+        if loss == 'wasserstein':
+            if metric_matrix is not None:
+                self.metric_matrix = tf.Variable(metric_matrix, trainable=False)
+                self.M_fixed = True
+            else:
+                self.metric_matrix = tf.Variable(
+                    tf.zeros(
+                        (self.protos.shape[0], self.protos.shape[0])
+                    ),
+                    trainable=False
+                )
+                self.M_fixed = False
+            self.wasserstein_lam = wasserstein_lam
+            self.wasserstein_p = wasserstein_p
+        else:
+            self.metric_matrix = None
+            self.wasserstein_lam = None
+            self.wasserstein_p = None
+            self.lam = lam
+
+        super(DomainLearnerModel, self).compile(**kwargs)
  
     def call(self, x, training=False):
         """
