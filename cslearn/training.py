@@ -1,6 +1,6 @@
 """
-This module contains functions to implement custom training methods for the
-various in the cslearn package.
+This module contains classes and functions to handle the training of various
+models in the CSLearn framework.
 """
 
 # ------------------------------------------------------------------------------
@@ -10,6 +10,7 @@ import tensorflow as tf
 import numpy as np
 
 from tqdm import tqdm
+from typing import Tuple
 
 from .arch import layers
 from .arch import models
@@ -23,7 +24,7 @@ class WassersteinClassifierTrainer:
     """
     def __init__(
             self,
-            model: tf.keras.models.Model
+            model: models.Classifier
         ):
         """
         Constructor for the WassersteinClassifierTrainer class.
@@ -144,9 +145,34 @@ class WassersteinClassifierTrainer:
             batch_size: int,
             train_size: int,
             valid_size: int
-        ):
+        ) -> dict:
         """
         Method to perform the full training loop.
+
+        Parameters
+        ----------
+        training_loader : tf.data.Dataset
+            The training data loader.
+            Data samples should be images, and labels should be one-hot encoded.
+        validation_loader : tf.data.Dataset
+            The validation data loader.
+            Data samples should be images, and labels should be one-hot encoded.
+        epochs : int
+            The number of epochs to train for.
+        batch_size : int
+            The batch size to use.
+        train_size : int
+            The number of samples in the training set.
+        valid_size : int
+            The number of samples in the validation set.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the training history.
+            The dictionary contains the following keys:
+            - 'accuracy': a list of the training accuracy at each epoch
+            - 'val_accuracy': a list of the validation accuracy at each epoch
         """
         history = {'accuracy': [], 'val_accuracy': []}
         steps_per_epoch = train_size // batch_size + 1
@@ -176,6 +202,293 @@ class WassersteinClassifierTrainer:
             acc = acc.numpy()/valid_steps
             history['val_accuracy'].append(acc)
             print(f'accuracy = {np.round(acc*100,2)}%')
+
+        return history
+
+# ------------------------------------------------------------------------------
+
+class WassersteinDomainLearnerTrainer:
+    """
+    Class to handle the training of a domain learner model with the custom
+    Wasserstein loss.
+    """
+    def __init__(
+            self,
+            model: models.DomainLearnerModel,
+            encoder: tf.keras.models.Model
+        ):
+        """
+        Constructor for the WassersteinDomainLearnerTrainer class.
+
+        Parameters
+        ----------
+        model : cslearn.arch.models.DomainLearnerModel
+            The model to train. This should be an instance of the
+            DomainLearnerModel class from the cslearn.arch.models module.
+            The model should have been compiled with the Wasserstein loss.
+        encoder : tf.keras.models.Model
+            The encoder model used to extract features from the input data.
+        """
+        if not isinstance(model, models.DomainLearnerModel):
+            raise ValueError(
+                "Model must be a cslearn.arch.models.DomainLearnerModel."
+            )
+        
+        self.model = model
+        self.encoder = encoder
+        self.optimizer = model.optimizer
+
+        if self.optimizer is None:
+            raise ValueError(
+                "No optimizer detected - has the model been compiled?"
+            )
+        
+        self.M = model.metric_matrix
+        self.lam = model.wasserstein_lam
+        self.p = model.wasserstein_p
+
+        self.Kmat = tf.exp(-self.lam*self.M**self.p-1)
+
+    @tf.function
+    def train_step(
+        self,
+        batch_data: tf.Tensor,
+        batch_labels: tf.Tensor
+        ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Method to perform a training step over a single batch of data.
+
+        Parameters
+        ----------
+        batch_data : tf.Tensor
+            The input data for the batch.
+        batch_labels : list of tf.Tensor
+            The true labels for the batch.
+            The first element is the true images, and the second is the true
+            properties.
+
+        Returns
+        -------
+        tf.Tensor
+            The accuracy of the model on the batch.
+        tf.Tensor
+            The reconstruction loss for the batch.
+        """
+        true_images = batch_labels[0]
+        true_properties = batch_labels[1]
+        with tf.GradientTape() as tape:
+            pred_images, pred_properties, _ = self.model(
+                batch_data, 
+                training=True
+            )
+            tape.watch(pred_images)
+            tape.watch(pred_properties)
+            dlw_dc = get_wasserstein_gradient(
+                y_true=true_properties, 
+                y_pred=pred_properties,
+                K_matrix=self.Kmat
+            )
+            dlr_dx = get_mse_gradient(
+                y_true=true_images,
+                y_pred=pred_images
+            )
+        grads = tape.gradient(
+            [pred_images, pred_properties],
+            self.model.trainable_variables,
+            output_gradients=[
+                tf.multiply(self.model.alpha, dlr_dx), 
+                tf.multiply(self.model.beta, dlw_dc)
+            ]
+        )
+        self.optimizer.apply_gradients(
+            zip(grads, self.model.trainable_variables)
+        )
+        acc = tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(pred_properties, axis=-1),
+                    tf.argmax(true_properties, axis=-1)
+                ),
+                tf.float32
+            )
+        )
+        recon_loss = tf.reduce_mean(tf.square(pred_images - true_images))
+        return acc, recon_loss
+        
+    @tf.function
+    def test_step(
+            self,
+            test_data: tf.Tensor,
+            test_labels: tf.Tensor
+        ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Method to perform a testing step over some data.
+
+        Parameters
+        ----------
+        test_data : tf.Tensor
+            The input data for the test.
+        test_labels : list of tf.Tensor
+            The true labels for the test data.
+            The first element is the true images, and the second is the true
+            properties.
+        
+        Returns
+        -------
+        tf.Tensor
+            The accuracy of the model on the test data.
+        tf.Tensor
+            The reconstruction loss for the test data.
+        """
+        true_images = test_labels[0]
+        true_properties = test_labels[1]
+        pred_images, pred_properties, _ = self.model(test_data, training=False)
+        acc = tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(pred_properties, axis=-1),
+                    tf.argmax(true_properties, axis=-1)
+                ),
+                tf.float32
+            )
+        )
+        recon_loss = tf.reduce_mean(tf.square(pred_images - true_images))
+        return acc, recon_loss
+ 
+    def fit(
+            self,
+            training_loader: tf.data.Dataset,
+            validation_loader: tf.data.Dataset,
+            epochs: int,
+            batch_size: int,
+            train_size: int,
+            valid_size: int,
+            warmup: int,
+            mu: float,
+            proto_update_step_size: int
+        ) -> dict:
+        """
+        Method to perform the full training loop.
+
+        Parameters
+        ----------
+        training_loader : tf.data.Dataset
+            The training data loader.
+            Data samples should be images.
+            Labels is a list of multiple tensors:
+            - the first tensor is the true images
+            - the second tensor is the true properties
+            - the third tensor is the distances to the prototypes (unused here)
+        validation_loader : tf.data.Dataset
+            The validation data loader.
+            Data structure is the same as for the training loader.
+        epochs : int
+            The number of epochs to train for.
+        batch_size : int
+            The batch size to use.
+        train_size : int
+            The number of samples in the training set.
+        valid_size : int
+            The number of samples in the validation set.
+        warmup : int
+            The number of epochs to train with only reconstruction loss. 
+            After this, the Wasserstein loss is added.
+        mu : float
+            The "mixing" parameter for the prototype update.
+        proto_update_step_size : int
+            The number of batches to use for the prototype update.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the training history.
+            The dictionary contains the following keys:
+            - 'accuracy': a list of the training accuracy at each epoch
+            - 'lr': a list of the training reconstruction loss at each epoch
+            - 'val_accuracy': a list of the validation accuracy at each epoch
+            - 'val_lr': a list of the validation reconstruction loss each epoch
+        """
+        history = {'accuracy': [], 'lr': [], 'val_accuracy': [], 'val_lr': []}
+        steps_per_epoch = train_size // batch_size + 1
+        print('\nStarting training for domain learner with Wasserstein loss...')
+        for epoch in range(epochs):
+            print(f'\nEpoch: {epoch+1}/{epochs}')
+            print(f'Learning rate: {self.optimizer.lr.numpy()}')
+
+            # set the beta parameter based on the current epoch
+            if epoch < warmup:
+                self.model.beta.assign(0.0)
+            elif epoch == warmup:
+                self.model.beta.assign(self.model.beta_val)
+
+            # update protos during warmup
+            if (warmup > 0) and (epoch <= warmup) and (epoch > 0):
+                new_protos = domain_learner_update_prototypes(
+                    old_prototypes=self.model.protos.numpy(),
+                    encoder=self.encoder,
+                    training_loader=training_loader,
+                    autoencoder_type='standard', # TODO: add VAE at some point
+                    mu=mu,
+                    proto_update_type='average',
+                    batches=proto_update_step_size,
+                    steps_per_epoch=steps_per_epoch,
+                    verbose=True
+                )
+                self.model.protos.assign(new_protos)
+
+            # TODO: if no M given, dynamically update M with prototypes
+            
+            # training
+            # TODO: take in steps_per_epoch as an argument
+            iterator = tqdm(
+                training_loader.take(steps_per_epoch),
+                desc='Steps',
+                ncols=80,
+                total=train_size//batch_size+1
+            )
+            acc = 0
+            recon_loss = 0
+            for data, labels in iterator:
+                a, l = self.train_step(data, labels)
+                acc += a
+                recon_loss += l
+            acc = acc.numpy()/steps_per_epoch
+            recon_loss = recon_loss.numpy()/steps_per_epoch
+            history['accuracy'].append(acc)
+            history['lr'].append(recon_loss)
+            print(f'Training accuracy = {np.round(acc*100,2)}%')
+            print(f'Training reconstruction loss = {np.round(recon_loss,2)}')
+
+            # validation
+            print('Testing on the validation set...', end=' ')
+            valid_steps = valid_size // batch_size + 1
+            acc = 0
+            recon_loss = 0
+            for data, labels in validation_loader.take(valid_steps):
+                a, l = self.test_step(data, labels)
+                acc += a
+                recon_loss += l
+            acc = acc.numpy()/valid_steps
+            recon_loss = recon_loss.numpy()/valid_steps
+            history['val_accuracy'].append(acc)
+            history['val_lr'].append(recon_loss)
+            print(f'accuracy = {np.round(acc*100,2)}%')
+            print(f'reconstruction loss = {np.round(recon_loss,2)}')
+
+            # update protos (when not in warmup stage)
+            if epoch > warmup-1:
+                new_protos = domain_learner_update_prototypes(
+                    old_prototypes=self.model.protos.numpy(),
+                    encoder=self.encoder,
+                    training_loader=training_loader,
+                    autoencoder_type='standard', # TODO: add VAE at some point
+                    mu=mu,
+                    proto_update_type='average',
+                    batches=proto_update_step_size,
+                    steps_per_epoch=steps_per_epoch,
+                    verbose=True
+                )
+                self.model.protos.assign(new_protos)
 
         return history
 
@@ -240,15 +553,14 @@ def get_wasserstein_gradient(
 
 # ------------------------------------------------------------------------------
 
-def get_reconstruction_gradient(
+def get_mse_gradient(
         y_true: tf.Tensor,
         y_pred: tf.Tensor
     ) -> tf.Tensor:
     """
     This function computes the gradient of the image reconstruction loss term
-    for the given true images and predictions.
-
-    It is assumed that the reconstruction loss is the mean squared error.
+    for the given true images and predictions, given that the loss is the mean
+    squared error.
 
     The resulting gradient is that of the loss with respect to the output image
     variables, which can the be used to backpropagate through the model.
@@ -271,259 +583,6 @@ def get_reconstruction_gradient(
 
 # ------------------------------------------------------------------------------
 
-@tf.function
-def wasserstein_domain_learner_train_step(
-    model: tf.keras.models.Model, 
-    optimizer: tf.keras.optimizers.Optimizer,
-    batch_data: tf.Tensor,
-    batch_labels: tf.Tensor,
-    K_matrix: tf.Tensor
-    ):
-    """
-    This function performs a training step over a single batch of data for a
-    domain learner model with the custom Wasserstein loss.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.DomainLearnerModel
-        The model to train.
-    optimizer : tf.keras.optimizers.Optimizer
-        The optimizer to use.
-    batch_data : tf.Tensor
-        The input data for the batch.
-    batch_labels : tf.Tensor
-        The true labels for the batch.
-    K_matrix : tf.Tensor
-        Matrix exponential of -lam*M-1, where M is the ground metric matrix.
-    """
-    true_images = batch_labels[0]
-    true_properties = batch_labels[1]
-    with tf.GradientTape() as tape:
-        pred_images, pred_properties, _ = model(batch_data, training=True)
-        tape.watch(pred_images)
-        tape.watch(pred_properties)
-        dlw_dc = get_wasserstein_gradient(
-            y_true=true_properties, 
-            y_pred=pred_properties,
-            K_matrix=K_matrix
-        )
-        dlr_dx = get_reconstruction_gradient(
-            y_true=true_images,
-            y_pred=pred_images
-        )
-
-    grads = tape.gradient(
-        [pred_images, pred_properties],
-        model.trainable_variables,
-        output_gradients=[
-            tf.multiply(model.alpha, dlr_dx), 
-            tf.multiply(model.beta, dlw_dc)
-        ]
-    )
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-
-    return pred_images, pred_properties
-
-# ------------------------------------------------------------------------------
-    
-@tf.function
-def wasserstein_domain_learner_test_step(
-    model: tf.keras.models.Model,
-    test_data: tf.Tensor,
-    test_labels: tf.Tensor
-    ) -> tf.Tensor:
-    """
-    This function performs a testing step over some data for a domain learner
-    model with the custom Wasserstein loss.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.DomainLearnerModel
-        The model to test.
-    test_data : tf.Tensor
-        The input data for the test.
-    test_labels : tf.Tensor
-        The true labels for the test data.
-
-    Returns
-    -------
-    tf.Tensor
-        The accuracy of the model on the test data.
-    """
-    true_images = test_labels[0]
-    true_properties = test_labels[1]
-    pred_images, pred_properties, _ = model(test_data, training=False)
-    acc = tf.reduce_mean(
-        tf.cast(
-            tf.equal(
-                tf.argmax(pred_properties, axis=-1),
-                tf.argmax(true_properties, axis=-1)
-            ),
-            tf.float32
-        )
-    )
-    lr = tf.reduce_mean(tf.square(pred_images - true_images))
-    return acc, lr
-
-# ------------------------------------------------------------------------------
-
-def wasserstein_domain_learner_train_loop(
-        model: tf.keras.models.Model,
-        encoder: tf.keras.models.Model,
-        optimizer: tf.keras.optimizers.Optimizer,
-        training_loader: tf.data.Dataset,
-        validation_loader: tf.data.Dataset,
-        epochs: int,
-        batch_size: int,
-        train_size: int,
-        valid_size: int,
-        warmup: int,
-        mu: float,
-        proto_update_step_size: int,
-        number_of_properties: int,
-        latent_dim: int
-    ) -> dict:
-    """
-    Function to train a domain learner model with the custom Wasserstein loss.
-
-    Makes use of the tqdm library to display a progress bar for the training
-    loop.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.DomainLearnerModel
-        The model to train.
-    optimizer : tf.keras.optimizers.Optimizer
-        The optimizer to use.
-    training_loader : tf.data.Dataset
-        The training data loader.
-        Data samples should be images, and labels should be one-hot encoded.
-    validation_loader : tf.data.Dataset
-        The validation data loader.
-        Data samples should be images, and labels should be one-hot encoded.
-    epochs : int
-        The number of epochs to train for.
-    batch_size : int
-        The batch size to use.
-    train_size : int
-        The number of samples in the training set.
-    valid_size : int
-        The number of samples in the validation set.
-    warmup : int, optional
-        The number of epochs to train with only reconstruction loss. After this,
-        the Wasserstein loss is added.
-    """
-    history = {'accuracy': [], 'lr': [], 'val_accuracy': [], 'val_lr': []}
-    steps_per_epoch = train_size // batch_size + 1
-    print('\nStarting training loop for domain learner with Wasserstein loss...')
-    for epoch in range(epochs):
-        print(f'\nEpoch: {epoch+1}/{epochs}')
-        print(f'Learning rate: {optimizer.lr.numpy()}')
-
-        # set the beta parameter based on the current epoch
-        if epoch < warmup:
-            model.beta.assign(0.0)
-        elif epoch == warmup:
-            model.beta.assign(model.beta_val)
-
-        # update protos during warmup
-        if (warmup > 0) and (epoch <= warmup) and (epoch > 0):
-            new_protos = domain_learner_update_prototypes(
-                old_prototypes=model.protos.numpy(),
-                encoder=encoder,
-                training_loader=training_loader,
-                autoencoder_type='standard', # TODO: add VAE at some point
-                mu=mu,
-                proto_update_type='average',
-                batches=proto_update_step_size,
-                number_of_properties=number_of_properties,
-                latent_dim=latent_dim,
-                steps_per_epoch=steps_per_epoch,
-                verbose=True
-            )
-            model.protos.assign(new_protos)
-
-        # compute K_matrix
-        # TODO: if no M given, dynamically update M with prototypes
-        lam = model.wasserstein_lam
-        M = model.metric_matrix**model.wasserstein_p
-        K_matrix = tf.exp(-lam*M-1)
-
-        # training
-        acc = 0
-        lr = 0
-        for data, labels in tqdm(
-            training_loader.take(steps_per_epoch),
-            desc='Steps',
-            ncols=80,
-            total=train_size//batch_size+1
-        ):
-            pred_ims, pred_props = wasserstein_domain_learner_train_step(
-                model=model,
-                optimizer=optimizer,
-                batch_data=data,
-                batch_labels=labels,
-                K_matrix=K_matrix
-            )
-            # get metrics for the current step
-            acc += tf.reduce_mean(
-                tf.cast(
-                    tf.equal(
-                        tf.argmax(pred_props, axis=-1),
-                        tf.argmax(labels[1], axis=-1)
-                    ),
-                    tf.float32
-                )
-            )
-            lr += tf.reduce_mean(tf.square(pred_ims - labels[0]))
-        acc = acc.numpy()/steps_per_epoch
-        lr = lr.numpy()/steps_per_epoch
-        history['accuracy'].append(acc)
-        history['lr'].append(lr)
-        print(f'Training accuracy = {np.round(acc*100,2)}%')
-        print(f'Training reconstruction loss = {np.round(lr,2)}')
-
-        # validation
-        print('Testing on the validation set...', end=' ')
-        valid_steps = valid_size // batch_size + 1
-        acc = 0
-        lr = 0
-        for data, labels in validation_loader.take(valid_steps):
-            a, l = wasserstein_domain_learner_test_step(
-                model=model,
-                test_data=data,
-                test_labels=labels
-            )
-            acc += a
-            lr += l
-        acc = acc.numpy()/valid_steps
-        lr = lr.numpy()/valid_steps
-        history['val_accuracy'].append(acc)
-        history['val_lr'].append(lr)
-        print(f'accuracy = {np.round(acc*100,2)}%')
-        print(f'reconstruction loss = {np.round(lr,2)}')
-
-        # update protos (when not in warmup stage)
-        if epoch > warmup-1:
-            new_protos = domain_learner_update_prototypes(
-                old_prototypes=model.protos.numpy(),
-                encoder=encoder,
-                training_loader=training_loader,
-                autoencoder_type='standard', # TODO: add VAE at some point
-                mu=mu,
-                proto_update_type='average',
-                batches=proto_update_step_size,
-                number_of_properties=number_of_properties,
-                latent_dim=latent_dim,
-                steps_per_epoch=steps_per_epoch,
-                verbose=True
-            )
-            model.protos.assign(new_protos)
-
-    return history
-
-# ------------------------------------------------------------------------------
-
 def domain_learner_update_prototypes(
         old_prototypes: np.ndarray,
         encoder: tf.keras.models.Model,
@@ -532,8 +591,6 @@ def domain_learner_update_prototypes(
         mu: float,
         proto_update_type: str,
         batches: int,
-        number_of_properties: int,
-        latent_dim: int,
         steps_per_epoch: int,
         verbose: bool = True,
     ):
@@ -543,19 +600,36 @@ def domain_learner_update_prototypes(
 
     Parameters
     ----------
+    old_prototypes : np.ndarray
+        The current prototypes of the domain learner model.
+    encoder : tf.keras.models.Model
+        The encoder model used to extract features from the input data.
+    training_loader : tf.data.Dataset
+        The training data loader.
+        Data samples should be images.
+        Labels is a list of multiple tensors:
+        - the first tensor is the true images (unused here)
+        - the second tensor is the true properties
+        - the third tensor is the distances to the prototypes (unused here)
+    autoencoder_type : str
+        The type of autoencoder used to extract features from the input data.
+        Currently, only 'standard' is supported.
     mu : float
-        The learning rate for the prototype update.
+        The "mixing" parameter for the prototype update.
     proto_update_type : str
-        The type of update to perform. Currently, only 'average' is supported.
+        The type of prototype update to perform.
+        Currently, only 'average' is supported.
     batches : int
-        The number of batches to use for the update.
+        The number of batches to use for the prototype update.
+    steps_per_epoch : int
+        The number of steps per epoch in the training data loader.
     verbose : bool, optional
-        Whether to print feedback during the update.
+        Whether to print feedback during the prototype update.
         Default is True.
     """
     # get number of prototypes and features
-    num_ps = number_of_properties
-    num_fs = latent_dim
+    num_ps = old_prototypes.shape[0]
+    num_fs = old_prototypes.shape[1]
 
     # intialize arrays
     pred_props = np.zeros(shape=(0, num_ps))
@@ -573,7 +647,7 @@ def domain_learner_update_prototypes(
         features = encoder(inputs, training=False).numpy()
         if autoencoder_type == 'variational':
             features = layers.ReparameterizationLayer(
-                latent_dim
+                num_fs
             )(features)[2].numpy()
 
         pred_props = np.append(pred_props, values=props, axis=0)

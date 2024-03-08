@@ -2428,10 +2428,11 @@ class ImageLearningController():
         ):
 
         if self.wass_train:
-            history = cstrain.wasserstein_domain_learner_train_loop(
-                model=self.model,
-                encoder=self.encoder,
-                optimizer=self.model.optimizer,
+            trainer = cstrain.WassersteinDomainLearnerTrainer(
+                self.model,
+                self.encoder
+            )
+            history = trainer.fit(
                 training_loader=self.training_loader,
                 validation_loader=self.validation_loader,
                 epochs=epochs,
@@ -2440,9 +2441,7 @@ class ImageLearningController():
                 valid_size=self.valid_size,
                 warmup=warmup,
                 mu=mu,
-                proto_update_step_size=proto_update_step_size,
-                number_of_properties=self.number_of_properties,
-                latent_dim=self.latent_dim,
+                proto_update_step_size=proto_update_step_size
             )
             self.prototypes = self.model.protos.numpy()
             self.training_history = history
