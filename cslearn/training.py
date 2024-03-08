@@ -12,6 +12,172 @@ import numpy as np
 from tqdm import tqdm
 
 from .arch import layers
+from .arch import models
+
+# ------------------------------------------------------------------------------
+
+class WassersteinClassifierTrainer:
+    """
+    Class to handle the training of a classifier model with the custom
+    Wasserstein loss.
+    """
+    def __init__(
+            self,
+            model: tf.keras.models.Model
+        ):
+        """
+        Constructor for the WassersteinClassifierTrainer class.
+
+        Parameters
+        ----------
+        model : cslearn.arch.models.Classifier
+            The model to train. This should be an instance of the Classifier
+            class from the cslearn.arch.models module.
+            The model should have been compiled with the Wasserstein loss.
+        """
+        if not isinstance(model, models.Classifier):
+            raise ValueError(
+                "Model must be an instance of cslearn.arch.models.Classifier."
+            )
+        
+        self.model = model
+        self.optimizer = model.optimizer
+
+        if self.optimizer is None:
+            raise ValueError(
+                "No optimizer detected - has the model been compiled?"
+            )
+        
+        self.M = model.metric_matrix
+        self.lam = model.wasserstein_lam
+        self.p = model.wasserstein_p
+
+        self.Kmat = tf.exp(-self.lam*self.M**self.p-1)
+
+    @tf.function
+    def train_step(
+            self,
+            batch_data: tf.Tensor,
+            batch_labels: tf.Tensor
+        ):
+        """
+        Method to perform a training step over a single batch of data.
+
+        Parameters
+        ----------
+        batch_data : tf.Tensor
+            The input data for the batch.
+        batch_labels : tf.Tensor
+            The true labels for the batch.
+
+        Returns
+        -------
+        tf.Tensor
+            The accuracy of the model on the batch.
+        """
+        with tf.GradientTape() as tape:
+            predictions = self.model(batch_data, training=True)
+            tape.watch(predictions)
+            dW_dh = get_wasserstein_gradient(
+                y_true=batch_labels, 
+                y_pred=predictions,
+                K_matrix=self.Kmat,
+                lam=self.lam
+            )
+        grads = tape.gradient(
+            predictions,
+            self.model.trainable_variables,
+            output_gradients=dW_dh
+        )
+        self.optimizer.apply_gradients(
+            zip(grads, self.model.trainable_variables)
+        )
+        acc = tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(predictions, axis=-1),
+                    tf.argmax(batch_labels, axis=-1)
+                ),
+                tf.float32
+            )
+        )
+        return acc
+
+    @tf.function
+    def test_step(
+            self,
+            test_data: tf.Tensor,
+            test_labels: tf.Tensor
+        ):
+        """
+        Method to perform a testing step over some data.
+
+        Parameters
+        ----------
+        test_data : tf.Tensor
+            The input data for the test.
+        test_labels : tf.Tensor
+            The true labels for the test data.
+
+        Returns
+        -------
+        tf.Tensor
+            The accuracy of the model on the test data.
+        """
+        predictions = self.model(test_data, training=False)
+        acc = tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(predictions, axis=-1),
+                    tf.argmax(test_labels, axis=-1)
+                ),
+                tf.float32
+            )
+        )
+        return acc
+
+    def fit(
+            self,
+            training_loader: tf.data.Dataset,
+            validation_loader: tf.data.Dataset,
+            epochs: int,
+            batch_size: int,
+            train_size: int,
+            valid_size: int
+        ):
+        """
+        Method to perform the full training loop.
+        """
+        history = {'accuracy': [], 'val_accuracy': []}
+        steps_per_epoch = train_size // batch_size + 1
+        print('\nStarting classifier training loop with Wasserstein loss...')
+        for epoch in range(epochs):
+
+            print(f'\nEpoch: {epoch+1}/{epochs}')
+            print(f'Learning rate: {self.optimizer.lr.numpy()}')
+            iterator = tqdm(
+                training_loader.take(steps_per_epoch),
+                desc='Batches',
+                ncols=80,
+                total=train_size//batch_size+1
+            )
+            acc = 0
+            for data, labels in iterator:
+                acc += self.train_step(data, labels)
+            acc = acc.numpy()/steps_per_epoch
+            history['accuracy'].append(acc)
+            print(f'Training accuracy = {np.round(acc*100,2)}%')
+
+            print('Testing on the validation set...', end=' ')
+            valid_steps = valid_size // batch_size + 1
+            acc = 0
+            for data, labels in validation_loader.take(valid_steps):
+                acc += self.test_step(data, labels)
+            acc = acc.numpy()/valid_steps
+            history['val_accuracy'].append(acc)
+            print(f'accuracy = {np.round(acc*100,2)}%')
+
+        return history
 
 # ------------------------------------------------------------------------------
 
@@ -71,184 +237,6 @@ def get_wasserstein_gradient(
 
     grad = term1 + term2
     return grad
-
-# ------------------------------------------------------------------------------
-
-@tf.function
-def wasserstein_classifier_train_step(
-        model: tf.keras.models.Model, 
-        optimizer: tf.keras.optimizers.Optimizer,
-        batch_data: tf.Tensor,
-        batch_labels: tf.Tensor,
-        K_matrix: tf.Tensor,
-        lam: float = 1.0
-    ) -> tf.Tensor:
-    """
-    Function performing a training step over a single batch of data for a
-    classifier model with the cutsom Wasserstein loss.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.Classifier
-        The model to train.
-    optimizer : tf.keras.optimizers.Optimizer
-        The optimizer to use.
-    batch_data : tf.Tensor
-        The input data for the batch.
-    batch_labels : tf.Tensor
-        The true labels for the batch.
-
-    Returns
-    -------
-    tf.Tensor
-        The predictions of the model on the batch.
-    """
-    with tf.GradientTape() as tape:
-        predictions = model(batch_data, training=True)
-        tape.watch(predictions)
-        dW_dh = get_wasserstein_gradient(
-            y_true=batch_labels, 
-            y_pred=predictions,
-            K_matrix=K_matrix,
-            lam=lam
-        )
-
-    grads = tape.gradient(predictions, model.trainable_variables, output_gradients=dW_dh)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-
-    return predictions
-
-# ------------------------------------------------------------------------------
-
-@tf.function
-def wasserstein_classifier_test_step(
-        model: tf.keras.models.Model,
-        test_data: tf.Tensor,
-        test_labels: tf.Tensor
-    ) -> tf.Tensor:
-    """
-    Function performing a testing step over some data for a classifier model
-    with the custom Wasserstein loss.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.Classifier
-        The model to test.
-    test_data : tf.Tensor
-        The input data for the test.
-    test_labels : tf.Tensor
-        The true labels for the test data.
-
-    Returns
-    -------
-    tf.Tensor
-        The accuracy of the model on the test data.
-    """
-    predictions = model(test_data, training=False)
-    acc = tf.reduce_mean(
-        tf.cast(
-            tf.equal(
-                tf.argmax(predictions, axis=-1),
-                tf.argmax(test_labels, axis=-1)
-            ),
-            tf.float32
-        )
-    )
-    return acc
-
-# ------------------------------------------------------------------------------
-
-def wasserstein_classifier_train_loop(
-        model: tf.keras.models.Model,
-        optimizer: tf.keras.optimizers.Optimizer,
-        training_loader: tf.data.Dataset,
-        validation_loader: tf.data.Dataset,
-        epochs: int,
-        batch_size: int,
-        train_size: int,
-        valid_size: int,
-    ) -> dict:
-    """
-    Function to train a classifier model with the custom Wasserstein loss.
-
-    Makes use of the tqdm library to display a progress bar for the training
-    loop.
-
-    Parameters
-    ----------
-    model : cslearn.arch.models.Classifier
-        The model to train.
-    optimizer : tf.keras.optimizers.Optimizer
-        The optimizer to use.
-    training_loader : tf.data.Dataset
-        The training data loader.
-        Data samples should be images, and labels should be one-hot encoded.
-    validation_loader : tf.data.Dataset
-        The validation data loader.
-        Data samples should be images, and labels should be one-hot encoded.
-    epochs : int
-        The number of epochs to train for.
-    batch_size : int
-        The batch size to use.
-    train_size : int
-        The number of samples in the training set.
-    valid_size : int
-        The number of samples in the validation set.
-    """
-    history = {'accuracy': [], 'val_accuracy': []}
-    steps_per_epoch = train_size // batch_size + 1
-    print('\nStarting training loop for classifier with Wasserstein loss...')
-    for epoch in range(epochs):
-        print(f'\nEpoch: {epoch+1}/{epochs}')
-        print(f'Learning rate: {optimizer.lr.numpy()}')
-        # compute K_matrix
-        lam = model.wasserstein_lam
-        M = model.metric_matrix**model.wasserstein_p
-        K_matrix = tf.exp(-lam*M-1)
-        # training
-        acc = 0
-        for data, labels in tqdm(
-            training_loader.take(steps_per_epoch),
-            desc='Steps',
-            ncols=80,
-            total=train_size//batch_size+1
-        ):
-            preds = wasserstein_classifier_train_step(
-                model=model,
-                optimizer=optimizer,
-                batch_data=data,
-                batch_labels=labels,
-                K_matrix=K_matrix,
-                lam=lam
-            )
-            # compute the accuracy of the current step
-            acc += tf.reduce_mean(
-                tf.cast(
-                    tf.equal(
-                        tf.argmax(preds, axis=-1),
-                        tf.argmax(labels, axis=-1)
-                    ),
-                    tf.float32
-                )
-            )
-        acc = acc.numpy()/steps_per_epoch
-        history['accuracy'].append(acc)
-        print(f'Training accuracy = {np.round(acc*100,2)}%')
-        # validation
-        print('Testing on the validation set...', end=' ')
-        valid_steps = valid_size // batch_size + 1
-        acc = 0
-        for data, labels in validation_loader.take(valid_steps):
-            acc += wasserstein_classifier_test_step(
-                model=model,
-                test_data=data,
-                test_labels=labels
-            )
-        acc = acc.numpy()/valid_steps
-        history['val_accuracy'].append(acc)
-        print(f'accuracy = {np.round(acc*100,2)}%')
-
-    return history
 
 # ------------------------------------------------------------------------------
 

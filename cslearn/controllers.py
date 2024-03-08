@@ -2368,15 +2368,15 @@ class ImageLearningController():
             )
             self.training_history = history.history
         else:
-            history = cstrain.wasserstein_classifier_train_loop(
-                model=self.model,
-                optimizer=self.model.optimizer,
+            # train with a custom training loop
+            trainer = cstrain.WassersteinClassifierTrainer(self.model)
+            history = trainer.fit(
                 training_loader=self.training_loader,
                 validation_loader=self.validation_loader,
                 epochs=epochs,
                 batch_size=self.batch_size,
                 train_size=self.train_size,
-                valid_size=self.valid_size
+                valid_size=self.valid_size,
             )
             self.training_history = history
 
