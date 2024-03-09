@@ -2441,6 +2441,8 @@ class ImageLearningController():
                 valid_size=self.valid_size,
                 warmup=warmup,
                 mu=mu,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
                 proto_update_step_size=proto_update_step_size
             )
             self.prototypes = self.model.protos.numpy()

@@ -243,11 +243,11 @@ class WassersteinDomainLearnerTrainer:
                 "No optimizer detected - has the model been compiled?"
             )
         
-        self.M = model.metric_matrix
         self.lam = model.wasserstein_lam
         self.p = model.wasserstein_p
+        self.M = model.metric_matrix**self.p
 
-        self.Kmat = tf.exp(-self.lam*self.M**self.p-1)
+        self.Kmat = tf.exp(-self.lam*self.M-1)
 
     @tf.function
     def train_step(
@@ -365,6 +365,8 @@ class WassersteinDomainLearnerTrainer:
             valid_size: int,
             warmup: int,
             mu: float,
+            steps_per_epoch: int,
+            validation_steps: int,
             proto_update_step_size: int
         ) -> dict:
         """
@@ -395,6 +397,8 @@ class WassersteinDomainLearnerTrainer:
             After this, the Wasserstein loss is added.
         mu : float
             The "mixing" parameter for the prototype update.
+        steps_per_epoch : int
+            The number of steps per epoch in the training data loader.
         proto_update_step_size : int
             The number of batches to use for the prototype update.
 
@@ -409,7 +413,10 @@ class WassersteinDomainLearnerTrainer:
             - 'val_lr': a list of the validation reconstruction loss each epoch
         """
         history = {'accuracy': [], 'lr': [], 'val_accuracy': [], 'val_lr': []}
-        steps_per_epoch = train_size // batch_size + 1
+        if steps_per_epoch is None:
+            steps_per_epoch = train_size // batch_size + 1
+        dataset_iter = iter(training_loader)
+        valid_iter = iter(validation_loader.repeat())
         print('\nStarting training for domain learner with Wasserstein loss...')
         for epoch in range(epochs):
             print(f'\nEpoch: {epoch+1}/{epochs}')
@@ -422,16 +429,10 @@ class WassersteinDomainLearnerTrainer:
                 self.model.beta.assign(self.model.beta_val)
             
             # training
-            # TODO: take in steps_per_epoch as an argument
-            iterator = tqdm(
-                training_loader.take(steps_per_epoch),
-                desc='Steps',
-                ncols=80,
-                total=train_size//batch_size+1
-            )
             acc = 0
             recon_loss = 0
-            for data, labels in iterator:
+            for step in tqdm(range(steps_per_epoch), desc='Batches', ncols=80):
+                data, labels = next(dataset_iter)
                 a, l = self.train_step(data, labels)
                 acc += a
                 recon_loss += l
@@ -444,15 +445,17 @@ class WassersteinDomainLearnerTrainer:
 
             # validation
             print('Testing on the validation set...', end=' ')
-            valid_steps = valid_size // batch_size + 1
+            if validation_steps is None:
+                validation_steps = valid_size // batch_size + 1
             acc = 0
             recon_loss = 0
-            for data, labels in validation_loader.take(valid_steps):
+            for step in range(validation_steps):
+                data, labels = next(valid_iter)
                 a, l = self.test_step(data, labels)
                 acc += a
                 recon_loss += l
-            acc = acc.numpy()/valid_steps
-            recon_loss = recon_loss.numpy()/valid_steps
+            acc = acc.numpy()/validation_steps
+            recon_loss = recon_loss.numpy()/validation_steps
             history['val_accuracy'].append(acc)
             history['val_lr'].append(recon_loss)
             print(f'accuracy = {np.round(acc*100,2)}%')
@@ -479,8 +482,8 @@ class WassersteinDomainLearnerTrainer:
                 np_protos = self.model.protos.numpy()
                 diff = np_protos[:,np.newaxis,:] - np_protos[np.newaxis,:,:]
                 dist = np.sqrt(np.sum(diff**2, axis=-1))
-                M = dist**self.model.wasserstein_p
-                self.model.metric_matrix.assign(M)
+                self.M = dist**self.p
+                self.Kmat = tf.exp(-self.lam*self.M-1)
 
         return history
 
