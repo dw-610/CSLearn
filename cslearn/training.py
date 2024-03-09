@@ -420,23 +420,6 @@ class WassersteinDomainLearnerTrainer:
                 self.model.beta.assign(0.0)
             elif epoch == warmup:
                 self.model.beta.assign(self.model.beta_val)
-
-            # update protos during warmup
-            if (warmup > 0) and (epoch <= warmup) and (epoch > 0):
-                new_protos = domain_learner_update_prototypes(
-                    old_prototypes=self.model.protos.numpy(),
-                    encoder=self.encoder,
-                    training_loader=training_loader,
-                    autoencoder_type='standard', # TODO: add VAE at some point
-                    mu=mu,
-                    proto_update_type='average',
-                    batches=proto_update_step_size,
-                    steps_per_epoch=steps_per_epoch,
-                    verbose=True
-                )
-                self.model.protos.assign(new_protos)
-
-            # TODO: if no M given, dynamically update M with prototypes
             
             # training
             # TODO: take in steps_per_epoch as an argument
@@ -475,20 +458,29 @@ class WassersteinDomainLearnerTrainer:
             print(f'accuracy = {np.round(acc*100,2)}%')
             print(f'reconstruction loss = {np.round(recon_loss,2)}')
 
-            # update protos (when not in warmup stage)
-            if epoch > warmup-1:
-                new_protos = domain_learner_update_prototypes(
-                    old_prototypes=self.model.protos.numpy(),
-                    encoder=self.encoder,
-                    training_loader=training_loader,
-                    autoencoder_type='standard', # TODO: add VAE at some point
-                    mu=mu,
-                    proto_update_type='average',
-                    batches=proto_update_step_size,
-                    steps_per_epoch=steps_per_epoch,
-                    verbose=True
-                )
-                self.model.protos.assign(new_protos)
+            # update prototypes
+            new_protos = domain_learner_update_prototypes(
+                old_prototypes=self.model.protos.numpy(),
+                encoder=self.encoder,
+                training_loader=training_loader,
+                autoencoder_type='standard', # TODO: add VAE at some point
+                mu=0.0 if epoch < warmup else mu,
+                proto_update_type='average',
+                batches=proto_update_step_size,
+                steps_per_epoch=steps_per_epoch,
+                verbose=True
+            )
+            self.model.protos.assign(new_protos)
+            
+            # if no M given, update M with new prototypes
+            # - this uses the Euclidean distance for now
+            # - can generalize to work with other metrics later
+            if not self.model.M_fixed:
+                np_protos = self.model.protos.numpy()
+                diff = np_protos[:,np.newaxis,:] - np_protos[np.newaxis,:,:]
+                dist = np.sqrt(np.sum(diff**2, axis=-1))
+                M = dist**self.model.wasserstein_p
+                self.model.metric_matrix.assign(M)
 
         return history
 
