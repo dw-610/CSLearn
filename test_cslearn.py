@@ -19,7 +19,7 @@ from cslearn.controllers import ImageLearningController
 def main():
     
     # parameters
-    M = np.array(
+    M: np.ndarray = np.array(
         [
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             [1, 0, 1, 2, 3, 4, 5, 6, 7, 8],
@@ -34,18 +34,21 @@ def main():
         ]
     ).astype(np.float32)/9.0
 
-    EPOCHS = 10
-    BATCH_SIZE = 64
+    EPOCHS: int = 1000
+    BATCH_SIZE: int = 64
+    STEPS_PER_EPOCH: int = 200
+    VALIDATION_STEPS: int = None
+    P_UPDATE_STEP_SIZE: int = 200
 
-    LATENT_DIM = 2
+    LATENT_DIM: int = 2
 
-    LOSS = 'wasserstein'
-    WASS_P = 1.0
-    WASS_LAM = 1.0
+    LOSS: str = 'wasserstein'
+    WASS_P: float = 1.0
+    WASS_LAM: float = 1.0
 
-    ALPHA = 1.0
-    BETA = 0.0
-    WARM = 0.0
+    ALPHA: float = 1.0
+    BETA: float = 100.0
+    WARM: int = 0
 
     # main code
     ctrl = ImageLearningController('domain_learner', debug=False)
@@ -62,17 +65,21 @@ def main():
         wasserstein_lam=WASS_LAM,
         wasserstein_p=WASS_P,
         learning_rate=0.001,
-        # schedule_type='cosine',
-        # sch_init_lr=0.0001,
-        # sch_warmup_steps=3*1876,
-        # sch_warmup_target=0.001,
-        # sch_decay_steps=7*1876,
+        schedule_type='cosine',
+        sch_init_lr=0.0001,
+        sch_warmup_steps=5*STEPS_PER_EPOCH,
+        sch_warmup_target=0.001,
+        sch_decay_steps=45*STEPS_PER_EPOCH,
     )
-    legend = [str(i) for i in range(10)]
     ctrl.train_learner(
         epochs=EPOCHS, 
-        warmup=WARM
+        warmup=WARM,
+        steps_per_epoch=STEPS_PER_EPOCH,
+        validation_steps=VALIDATION_STEPS,
+        proto_update_step_size=P_UPDATE_STEP_SIZE,
+        mu=0.75,
     )
+    legend = [str(i) for i in range(10)]
     ctrl.eval_plot_accuracy_curves()
     ctrl.eval_plot_scattered_features(legend=legend)
     ctrl.eval_plot_scattered_protos(legend=legend)
@@ -80,7 +87,7 @@ def main():
     # ctrl.eval_visualize_all_dimensions()
     ctrl.eval_compare_true_and_generated()
 
-    print(ctrl.prototypes)
+    # print(ctrl.prototypes)
 
     print('\nFinished running - no errors.\n')
 
