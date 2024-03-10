@@ -1,97 +1,56 @@
-# add-wasserstein branch notes
+# add-wasserstein-vae branch notes
 
-This file contains notes taken for work on this branch.
+This file contains notes for work on this branch.
 
-Goal progression:
+Goal:
 
-- Add Wasserstein loss as an option for training the classifier models.
-- Add this loss as an option when training the classifier module of the domain learner.
-- Stretch: use this loss to guide the distribution-based VAE learning as well?
+- Add wasserstein loss option when training the VAE
 
-## 03/04/24
+## 03/10/24
 
-To do:
+Central idea is to use the Wasserstein loss to train a VAE.
 
-- Add Wasserstein as a loss option when training the basic classifier network
-  - Figure out how the loss is calculated (look to Frogner et al.)
-  - Implement the loss in a custom function
-  - Feed this function to the keras workflow to use it for training
+To compute Wasserstein loss, we need three things:
 
-Notes:
+1. Input distribution (discrete) or measure/density (continuous)
+2. Target distribution (discrete) or measure/density (continuous)
+3. Ground metric over the input and target space
 
-- First attempt: try to just impliment the iterative loss computation in a custom loss function that is passed to model.compile
-  - This may have cause issues with the gradients? Not sure
-  - Not applicable (directly) - Frogner paper only gives algorithm for computing the *gradient*, not the loss itself
-- Will continue with trying to impliment this gradient methods
-  - Essentially, compute the gradient $\partial W_p^p / \partial h(x)$ as in the paper
-  - Then use this to back prop over all the other parameters, using the automatic gradients computed for $\partial h(x)/ \partial \theta$
-- It works!
-  - Implemented the MNIST experiment from the Frogner paper, with numerical distance as the grounding metric
-  - Trained a classifier using the custom gradient method mentioned above
-  - The resulting feature maps smoothly transitions from 0 to 1 to ... to 9
-- *Challenges*
-  - The implementation I am using right now requires a custom training loop, i.e. it is not using model.fit()
-    - Thus, it is not readily compatible with the current CSLearn setup
-  - The magnitude of the distances in $\textbf{M}$ affects the stability of the training, as well as the magnitude of $\lambda$
-    - Large $\lambda$ seemed to cause instability, as well as large elements of $\textbf{M}$
-      - Can fix this by scaling the elements of $\textbf{M}$
+In the case of a classifer, we have
 
-## 03/06/24
+1. The input distribution is the predicted distribution over the classes
+2. The target "distribution" is 1 for the true class and 0 elsewhere
+    - I.e., it is deterministic
+3. The ground metric is a pairwise distance defined between each class
 
-To do:
+In the case of the VAE, the input/target space is essentially $\mathbb{R}^{H \times X \times C}$, and thus an image can be considered as a vector $\textbf{x} \in \mathbb{R}^{H \times X \times C}$. Then we need:
 
-- Integrate Wasserstein loss as an option when training classifiers in CSLearn
-  - If Wasserstein is specified, use a custom-defined training loop, else use model.fit() (can retrofit later so that all training methods are consistent, with the custom training loop)
-  - Pass training-specified parameters to the compile method (Metric matrix, required for Wasserstein, and the lambda balancing parameter)
+- *Target distribution.* We can take this to be a Gaussian with $\boldsymbol{\mu} = \textbf{x}$. Let the covariance matrix $\boldsymbol{\Sigma}$ be diagonal, i.e., assume independent pixels (this is obviously not a good assumption - but we can start here). Let the vector representing the diagonal of this matrix be $\boldsymbol{\sigma}$.  
+Analogous to the discrete case, we can make the target distribution "deterministic" by letting $\boldsymbol{\sigma} = \textbf{0}$.
+  - This might cause issues? If so we can take the variances to be very small values
+- *Input distribution.* Assume that the outputs are also multivariate independent Gaussians: $$ \hat{\textbf{x}} \mid \textbf{z} \sim \mathcal{N}(\hat{\boldsymbol{\mu}}, \text{diag}(\boldsymbol{\hat{\sigma}}^2)) $$  
+where $\hat{\boldsymbol{\mu}}$ and $\hat{\boldsymbol{\sigma}}$ are outputs of the decoder. Then both the input and target measures are "diagonal" multivariate Gaussians, with different mean and variance parameters.
+- *Ground metric*. We can just take the ground metric to be $$ d(\textbf{x}, \textbf{y}) = \Vert \textbf{x} - \textbf{y} \Vert $$  
+If we let $p = 2$, we then get the simple squared divergence $$ d(\textbf{x}, \textbf{y})^2 = \Vert \textbf{x} - \textbf{y} \Vert^2 $$
 
-Notes:
+The 2-Wasserstein distance between two marginal distributions is defined as $$ W_2^2(\alpha, \beta) \stackrel{\Delta}{=} \min_{\pi \in \Pi(\alpha, \beta)} \int_{\mathbb{R}^d} \Vert x - y \Vert^2 d\pi(x,y) $$
 
-- Integrated Wassertain loss-based training into the classifier model of CSLearn
-  - specify loss as 'wasserstein' when calling compile_learner
-  - Pass the metric matrix and (optionally) $\lambda$ and $p$ to compile_learner
-  - Automatically tracks the accuracy and saves it to the .history attribute
-  - As no loss is computed, loss is not tracked
-  - Can use the typical eval methods for the classifier (not eval_plot_loss)
+Let $\textbf{x} \sim \boldsymbol{\alpha} = \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ and $\hat{\textbf{x}} \sim \boldsymbol{\beta} = \mathcal{N}(\hat{\boldsymbol{\mu}}, \hat{\boldsymbol{\Sigma}})$, where $\boldsymbol{\Sigma} = \text{diag}(\boldsymbol{\sigma}^2)$ and $\hat{\boldsymbol{\Sigma}} = \text{diag}(\boldsymbol{\hat{\sigma}}^2)$. Then from [1] we have $$ W_2^2(\boldsymbol{\alpha}, \boldsymbol{\beta}) = \Vert \boldsymbol{\mu} - \hat{\boldsymbol{\mu}} \Vert^2 - \mathcal{B}^2(\boldsymbol{\Sigma}, \hat{\boldsymbol{\Sigma}}) $$
+where $\mathcal{B}$ is the *Bures* distance between positive matrices: $$ \mathcal{B}^2(\boldsymbol{\Sigma}, \hat{\boldsymbol{\Sigma}}) \stackrel{\Delta}{=} \text{Tr}(\boldsymbol{\Sigma}) + \text{Tr}(\hat{\boldsymbol{\Sigma}}) - 2\text{Tr}(\boldsymbol{\Sigma}^\frac{1}{2}\hat{\boldsymbol{\Sigma}}\boldsymbol{\Sigma}^\frac{1}{2})^\frac{1}{2} $$
 
-## 03/07/24
+Since we are dealing with diagonal matrices, this simplifies significantly. First, the trace is just $$ \text{Tr}(\boldsymbol{\Sigma}) = \sum_i \sigma_i^2 $$
+and the square root of the matrix is the square root of each element. So we have $$ \text{Tr}(\boldsymbol{\Sigma}^\frac{1}{2}\hat{\boldsymbol{\Sigma}}\boldsymbol{\Sigma}^\frac{1}{2})^\frac{1}{2} = \sqrt{\sum_i \sigma_i^2 \hat{\sigma}_i^2} $$
+and the Bures distance is then just given by $$ \mathcal{B}^2(\boldsymbol{\Sigma}, \hat{\boldsymbol{\Sigma}}) = \sum_i \sigma_i^2 + \sum_i \hat{\sigma}_i^2 - 2\sqrt{\sum_i \sigma_i^2 \hat{\sigma}_i^2} $$
+Then the 2-Wasserstein distance is just $$ \boxed{W_2^2(\boldsymbol{\alpha}, \boldsymbol{\beta}) = \Vert \boldsymbol{\mu} - \hat{\boldsymbol{\mu}} \Vert^2 - \Vert \boldsymbol{\sigma} \Vert^2 - \Vert \hat{\boldsymbol{\sigma}} \Vert^2 + 2 \Vert \boldsymbol{\sigma} \circ \hat{\boldsymbol{\sigma}} \Vert} $$
 
-To do:
+### Notes/Comments
 
-- Integrate Wasserstein loss as an option when training the domain learner
-  - Idea is that the loss function now looks like this: $$ \mathcal{L} = \alpha \ell_r + \beta \ell_W $$ where $$ \ell_W = W_p^p - \lambda H $$
-  - Note that the Frogner paper uses $1/\lambda$ for the regularization - to be consistent with other domain learner approaches, we want to use just $\lambda$ as a greater value should *increase* regularization/smoothing
-  - Should be able to create a custom training loop where updates are done with something like
+- The above metric does not include entropic regularization
+- If we assume that the target variances are approximately zero, the metric simplifies even further
+  - This holds even in the non-diagonal case; left with just the mean and esimated variance-only terms
+    - This is very close to the VAE loss term based on the ELBO
+- Might need to look at more complicated problem set up to get any significant differences from existing approach
 
-    ```python
-    r_grads = tape.gradient(reconstructed, model.trainable_variables, output_gradients=dlr_dx)
-    w_grads = tape.graident(predictions, model.trainable_variables, output_gradients=dlw_dx)
-    grads = alpha*r_grads + beta*w_grads
-    ```
+### Reference
 
-- Do some testing with the new framework
-
-Notes:
-
-- Added wasserstein option to domain learner framework
-  - Right now, not updating M from the prototypes
-    - Need to do this when M isn't provided
-  - Need to clean up the code a bit
-    - Figure out the best way to handle all of the training functions
-      - Standalone functions as they are now?
-      - Collected in a "trainer" object?
-- Preliminary tests (MNIST) seem to confirm that it is working correctly
-  - With $\alpha = 0.01$ and $\beta = 100.0$, the feature space seems "mixed" between the Wasserstein-only and the autoencoder-only
-  - With $\alpha = 0.0$, it learns the "semi-circle" shape similar to first tests for Wasserstein classifier 
-  - With $\beta = 0.0$, it learns the more mixed up representations typical from the autoencoder
-- For now, have just kept the regularization parameter as $1/\lambda$
-
-## 03/08/24
-
-To do:
-
-- Clean up code
-  - Refactor the custom training loops
-    - Create a "trainer" object
-      - methods for gradient computations
-      - train_step and test_step methods
-      - "fit" method for performing the training loop
+[1] Janati et al, "Entropic Optimal Tranport between Unbalanced Gaussian Measures has a Closed Form", 2020.
