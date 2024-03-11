@@ -31,6 +31,7 @@ from contextlib import nullcontext
 from . import feeders
 from . import utilities as utils
 from . import visualization as vis
+from . import training as cstrain
 from .arch import models, layers
 
 # ------------------------------------------------------------------------------
@@ -51,6 +52,8 @@ class ImageLearningController():
     batch_size = 32             # Batch size for training
     buffer_size = 10000         # Buffer size for training
     autoencoder_type = 'standard' # Type of autoencoder to use
+
+    wass_train = False          # Whether to use the Wasserstein loss
 
     debug_mode = False          # Whether to use the debug mode
     use_gpu = True              # Whether to use the GPU for model training
@@ -102,7 +105,7 @@ class ImageLearningController():
 
         if debug:
             self.debug_mode = True
-            tf.config.experimental_run_functions_eagerly(True)
+            tf.config.run_functions_eagerly(True)
 
         if not use_gpu:
             self.use_gpu = False
@@ -341,13 +344,14 @@ class ImageLearningController():
         assert latent_activation in ['relu', 'selu', 'gelu', 'linear'], \
             "Latent activation must be one of 'relu', 'selu', 'gelu', or \
                 'linear'."
-        assert output_activation in ['linear', 'sigmoid'], \
-            "Output activation must be one of 'linear' or 'sigmoid'."
+        assert output_activation in ['linear', 'sigmoid', 'softmax'], \
+            "Output activation must be one of 'linear','sigmoid', or 'softmax'."
 
         # save off important values as attributes
         self.latent_dim = latent_dim
         self.architecture = architecture
         self.autoencoder_type = autoencoder_type
+        self.output_activation = output_activation
         if self.learner_type == 'domain_learner':
             self.distance = distance
             self.similarity = similarity
@@ -411,7 +415,10 @@ class ImageLearningController():
             sch_init_lr: Optional[float] = 1e-4,
             sch_decay_steps: Optional[int] = 10000,
             sch_warmup_target: Optional[float] = None,
-            sch_warmup_steps: Optional[int] = None
+            sch_warmup_steps: Optional[int] = None,
+            metric_matrix: Optional[np.ndarray] = None,
+            wasserstein_lam: Optional[float] = 1.0,
+            wasserstein_p: Optional[float] = 1.0
         ):
         """
         Method for compiling the models. This method should be called after
@@ -421,10 +428,10 @@ class ImageLearningController():
         ----------
         loss : str, optional
             The loss function to use for training.
-            Options for 'classifier' are 'categorical_crossentropy'.
+            Options for 'classifier' are 'categorical_crossentropy', 
+                'wasserstein'.
             Options for 'autoencoder' are 'mse' or 'ssim'.
-            Domain learner uses a custom loss function, so this parameter is
-            ignored.
+            Options for 'domain_learner' are 'basic' or 'wasserstein'
             Default is 'mse'.
         optimizer : str, optional
             The optimizer to use for training.
@@ -478,6 +485,19 @@ class ImageLearningController():
             The number of steps for the warmup phase.
             Only used if 'schedule' is 'cosine'.
             Default is 1000.
+        metric_matrix : np.ndarray, optional
+            The matrix of distances between the classes.
+            Only used for the Wasserstein loss.
+            For the domain_learner, if None, the matrix is dynamically computed
+            from the prototypes learned during training.
+            Default is None.
+        wasserstein_lam : float, optional
+            The balancing parameter for the Wasserstein loss.
+            Default is 1.0.
+        wasserstein_p : float, optional
+            The exponent for the distance metric in the Wasserstein loss.
+            To get a valid metric, this should be >= 1.
+            Default is 1.0.
         """
         # check that the models have been created or loaded
         assert self.models_created or self.models_loaded, \
@@ -534,7 +554,10 @@ class ImageLearningController():
             alpha=alpha,
             beta=beta,
             lam=lam,
-            schedule=schedule
+            schedule=schedule,
+            metric_matrix=metric_matrix,
+            wasserstein_lam=wasserstein_lam,
+            wasserstein_p=wasserstein_p
         )
 
         # set flag to indicate that models have been compiled
@@ -1794,25 +1817,13 @@ class ImageLearningController():
             global_pool_type=global_pool_type,
             dropout=dropout
         )
-        
-        # create the classifier
-        inputs = tf.keras.Input(shape=(self.height, self.width, self.channels))
 
-        if use_awgn:
-            x = layers.AWGNLayer(variance=awgn_variance)(inputs)
-            x = encoder(x)
-        else:
-            x = encoder(inputs)
-
-        x = tf.keras.layers.Dense(
-            units=self.number_of_properties,
-            activation=output_activation,
-            use_bias=False
-        )(x)
-
-        classifier = tf.keras.Model(
-            inputs=inputs,
-            outputs=x,
+        classifier = models.Classifier(
+            num_classes=self.number_of_properties,
+            encoder=encoder,
+            output_activation=output_activation,
+            use_awgn=use_awgn,
+            awgn_variance=awgn_variance,
             name='classifier'
         )
 
@@ -2175,14 +2186,29 @@ class ImageLearningController():
             clipvalue: float,
             metrics: list,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
+            metric_matrix: np.ndarray,
+            wasserstein_lam: float,
+            wasserstein_p: float,
             **kwargs
         ):
 
         # set the loss based on the provided string
         if loss == 'categorical_crossentropy':
             loss = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
+        elif loss == 'wasserstein':
+            self.wass_train = True
+            if metric_matrix is None:
+                raise ValueError(
+                    "Must provide a metric matrix for Wasserstein loss."
+                )
+            # make sure the output act is softmax
+            if self.output_activation != 'softmax':
+                raise ValueError(
+                    "output_activation (set with .create_learner) must be" + \
+                    " 'softmax' for Wasserstein loss."
+                )
         else:
-            raise ValueError("Got invalid loss function.")
+            raise ValueError(f"Got invalid loss function: {loss}.")
         
         # set the optimizer based on the provided string
         if optimizer == 'adam':
@@ -2193,13 +2219,16 @@ class ImageLearningController():
                 clipvalue=clipvalue
             )
         else:
-            raise ValueError("Got invalid optimizer.")
+            raise ValueError(f"Got invalid optimizer: {optimizer}.")
 
         # compile the model with the model's .compile method
         self.model.compile(
             loss=loss,
             optimizer=optimizer,
-            metrics=metrics
+            metrics=metrics,
+            metric_matrix=metric_matrix,
+            wasserstein_lam=wasserstein_lam,
+            wasserstein_p=wasserstein_p
         )
 
         # set flag to indicate that models have been compiled
@@ -2264,6 +2293,7 @@ class ImageLearningController():
     
     def _compile_semantic_learner(
             self,
+            loss: str,
             optimizer: str,
             learning_rate: float,
             weight_decay: float,
@@ -2274,8 +2304,15 @@ class ImageLearningController():
             lam: float,
             metrics: list,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
+            metric_matrix: np.ndarray,
+            wasserstein_lam: float,
+            wasserstein_p: float,
             **kwargs
         ):
+
+        # check if wasserstein loss is being used
+        if loss == 'wasserstein':
+            self.wass_train = True
 
         # set the optimizer based on the provided string
         if optimizer == 'adam':
@@ -2291,11 +2328,15 @@ class ImageLearningController():
         # compile the model with the model's .compile method
         if self.learner_type == 'domain_learner':
             self.model.compile(
+                loss=loss,
                 optimizer=optimizer,
                 alpha=alpha,
                 beta=beta,
                 lam=lam,
-                metrics=metrics
+                metrics=metrics,
+                metric_matrix=metric_matrix,
+                wasserstein_lam=wasserstein_lam,
+                wasserstein_p=wasserstein_p
             )
         else:
             raise ValueError("Invalid learner type.")
@@ -2314,19 +2355,30 @@ class ImageLearningController():
             **kwargs
         ):
         
-        # train the model with the model's .fit method
-        history = self.model.fit(
-            x=self.training_loader,
-            epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
-            validation_data=self.validation_loader,
-            validation_steps=validation_steps,
-            callbacks=callbacks,
-            verbose=verbose
-        )
-
-        # save the training history dictionary as an attribute
-        self.training_history = history.history
+        if not self.wass_train:
+            # train the model with the model's .fit method
+            history = self.model.fit(
+                x=self.training_loader,
+                epochs=epochs,
+                steps_per_epoch=steps_per_epoch,
+                validation_data=self.validation_loader,
+                validation_steps=validation_steps,
+                callbacks=callbacks,
+                verbose=verbose
+            )
+            self.training_history = history.history
+        else:
+            # train with a custom training loop
+            trainer = cstrain.WassersteinClassifierTrainer(self.model)
+            history = trainer.fit(
+                training_loader=self.training_loader,
+                validation_loader=self.validation_loader,
+                epochs=epochs,
+                batch_size=self.batch_size,
+                train_size=self.train_size,
+                valid_size=self.valid_size,
+            )
+            self.training_history = history
 
         # set flag to indicate that models have been trained
         self.models_trained = True
@@ -2375,6 +2427,101 @@ class ImageLearningController():
             **kwargs
         ):
 
+        if self.wass_train:
+            trainer = cstrain.WassersteinDomainLearnerTrainer(
+                self.model,
+                self.encoder
+            )
+            history = trainer.fit(
+                training_loader=self.training_loader,
+                validation_loader=self.validation_loader,
+                epochs=epochs,
+                batch_size=self.batch_size,
+                train_size=self.train_size,
+                valid_size=self.valid_size,
+                warmup=warmup,
+                mu=mu,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
+                proto_update_step_size=proto_update_step_size
+            )
+            self.prototypes = self.model.protos.numpy()
+            self.training_history = history
+        else:
+            self._domain_learner_basic_train_loop(
+                epochs=epochs,
+                steps_per_epoch=steps_per_epoch,
+                validation_steps=validation_steps,
+                callbacks=callbacks,
+                verbose=verbose,
+                proto_update_type=proto_update_type,
+                proto_update_step_size=proto_update_step_size,
+                mu=mu,
+                warmup=warmup,
+                proto_plot_save_path=proto_plot_save_path,
+                proto_plot_colors=proto_plot_colors,
+                proto_plot_legend=proto_plot_legend
+            )
+
+        # set flag to indicate that models have been trained
+        self.models_trained = True
+
+
+    def _setup_comet_experiment(
+            self,
+            log_experiment: bool
+        ):
+        """
+        Method for setting up the comet ML experiment context (or lack thereof).
+        """
+        # if logging is specified, set up the experiment context
+        if log_experiment:
+            if comet_imported == True:
+                # load in the comet information
+                try:
+                    with open('comet_info.json', 'r') as f:
+                        comet_info = json.load(f)
+                except:
+                    raise ValueError("Could not load comet info from " \
+                        + "'comet_info.json'.")
+
+                experiment = Experiment(
+                    api_key = comet_info['API_KEY'],
+                    project_name = comet_info['PROJECT'],
+                    workspace = comet_info['WORKSPACE'],
+                    auto_metric_step_rate = 100,
+                    auto_histogram_epoch_rate=10,
+                    auto_histogram_weight_logging = False,
+                    auto_histogram_gradient_logging = False,
+                    auto_histogram_activation_logging = False
+                )
+                training_context = experiment.train()
+            else:
+                training_context = nullcontext()
+        # otherwise, just use a null context
+        else:
+            training_context = nullcontext()
+
+        return training_context
+
+    def _domain_learner_basic_train_loop(
+            self,
+            epochs: int,
+            steps_per_epoch: Optional[int] = None,
+            validation_steps: Optional[int] = None,
+            callbacks: Optional[list] = None,
+            verbose: Optional[int] = 1,
+            proto_update_type: Optional[str] = 'average',
+            proto_update_step_size: Optional[int] = 100,
+            mu: Optional[float] = 0.1,
+            warmup: Optional[int] = 0,
+            proto_plot_save_path: Optional[str] = None,
+            proto_plot_colors: Optional[list] = None,
+            proto_plot_legend: Optional[list] = None
+        ):
+        """
+        Internal method for training the domain learner model.
+        """
         self.training_history = {}
 
         # initialize the prototype plotter, if specified
@@ -2437,52 +2584,9 @@ class ImageLearningController():
                     batches=proto_update_step_size,
                     verbose=True if verbose==1 else False
                 )
-
                 # save the prototype plots, if specified
                 if prototype_plotter is not None:
                     prototype_plotter.update_and_save(self.prototypes)
-
-        # set flag to indicate that models have been trained
-        self.models_trained = True
-
-
-    def _setup_comet_experiment(
-            self,
-            log_experiment: bool
-        ):
-        """
-        Method for setting up the comet ML experiment context (or lack thereof).
-        """
-        # if logging is specified, set up the experiment context
-        if log_experiment:
-            if comet_imported == True:
-                # load in the comet information
-                try:
-                    with open('comet_info.json', 'r') as f:
-                        comet_info = json.load(f)
-                except:
-                    raise ValueError("Could not load comet info from " \
-                        + "'comet_info.json'.")
-
-                experiment = Experiment(
-                    api_key = comet_info['API_KEY'],
-                    project_name = comet_info['PROJECT'],
-                    workspace = comet_info['WORKSPACE'],
-                    auto_metric_step_rate = 100,
-                    auto_histogram_epoch_rate=10,
-                    auto_histogram_weight_logging = False,
-                    auto_histogram_gradient_logging = False,
-                    auto_histogram_activation_logging = False
-                )
-                training_context = experiment.train()
-            else:
-                training_context = nullcontext()
-        # otherwise, just use a null context
-        else:
-            training_context = nullcontext()
-
-        return training_context
-
 
     def _domain_learner_update_model(
             self,
