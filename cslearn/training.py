@@ -215,7 +215,8 @@ class WassersteinDomainLearnerTrainer:
     def __init__(
             self,
             model: models.DomainLearnerModel,
-            encoder: tf.keras.models.Model
+            encoder: tf.keras.models.Model,
+            autoencoder_type: str
         ):
         """
         Constructor for the WassersteinDomainLearnerTrainer class.
@@ -228,6 +229,9 @@ class WassersteinDomainLearnerTrainer:
             The model should have been compiled with the Wasserstein loss.
         encoder : tf.keras.models.Model
             The encoder model used to extract features from the input data.
+        autoencoder_type : str
+            The type of autoencoder used to extract features from the input data.
+            Options are 'standard' and 'variational'.
         """
         if not isinstance(model, models.DomainLearnerModel):
             raise ValueError(
@@ -237,6 +241,8 @@ class WassersteinDomainLearnerTrainer:
         self.model = model
         self.encoder = encoder
         self.optimizer = model.optimizer
+        self.ae_type = autoencoder_type
+        self.scaled = model.scaled_prior
 
         if self.optimizer is None:
             raise ValueError(
@@ -277,29 +283,66 @@ class WassersteinDomainLearnerTrainer:
         true_images = batch_labels[0]
         true_properties = batch_labels[1]
         with tf.GradientTape() as tape:
-            pred_images, pred_properties, _ = self.model(
-                batch_data, 
-                training=True
+            if self.ae_type == 'standard':
+                pred_images, pred_properties, _ = self.model(
+                    batch_data, 
+                    training=True
+                )
+                tape.watch(pred_images)
+                tape.watch(pred_properties)
+                dlw_dc = get_wasserstein_gradient(
+                    y_true=true_properties, 
+                    y_pred=pred_properties,
+                    K_matrix=self.Kmat
+                )
+                dlr_dx = get_mse_gradient(
+                    y_true=true_images,
+                    y_pred=pred_images
+                )
+            elif self.ae_type == 'variational':
+                pred_images, pred_properties, _, logstds, mus = self.model(
+                    batch_data,
+                    training=True
+                )
+                tape.watch(pred_images)
+                tape.watch(pred_properties)
+                tape.watch(logstds)
+                tape.watch(mus)
+                dlw_dc = get_wasserstein_gradient(
+                    y_true=true_properties, 
+                    y_pred=pred_properties,
+                    K_matrix=self.Kmat
+                )
+                dlr_dx = get_vae_lr_gradient(
+                    y_true=true_images,
+                    y_pred=pred_images
+                )
+                dkl_dm = get_vae_kl_mu_gradient(mus, self.scaled)
+                dkl_dlogstd = get_vae_kl_logstd_gradient(logstds, self.scaled)
+            else:
+                raise ValueError("Invalid autoencoder type.")
+        if self.ae_type == 'standard':
+            grads = tape.gradient(
+                [pred_images, pred_properties],
+                self.model.trainable_variables,
+                output_gradients=[
+                    tf.multiply(self.model.alpha, dlr_dx), 
+                    tf.multiply(self.model.beta, dlw_dc)
+                ]
             )
-            tape.watch(pred_images)
-            tape.watch(pred_properties)
-            dlw_dc = get_wasserstein_gradient(
-                y_true=true_properties, 
-                y_pred=pred_properties,
-                K_matrix=self.Kmat
+        elif self.ae_type == 'variational':
+            grads = tape.gradient(
+                [pred_images, pred_properties, mus, logstds],
+                self.model.trainable_variables,
+                output_gradients=[
+                    tf.multiply(self.model.alpha, dlr_dx), 
+                    tf.multiply(self.model.beta, dlw_dc),
+                    tf.multiply(self.model.lam, dkl_dm),
+                    tf.multiply(self.model.lam, dkl_dlogstd)
+                ]
             )
-            dlr_dx = get_mse_gradient(
-                y_true=true_images,
-                y_pred=pred_images
-            )
-        grads = tape.gradient(
-            [pred_images, pred_properties],
-            self.model.trainable_variables,
-            output_gradients=[
-                tf.multiply(self.model.alpha, dlr_dx), 
-                tf.multiply(self.model.beta, dlw_dc)
-            ]
-        )
+        else:
+            raise ValueError("Invalid autoencoder type.")
         self.optimizer.apply_gradients(
             zip(grads, self.model.trainable_variables)
         )
@@ -312,8 +355,24 @@ class WassersteinDomainLearnerTrainer:
                 tf.float32
             )
         )
-        recon_loss = tf.reduce_mean(tf.square(pred_images - true_images))
-        return acc, recon_loss
+        recon_loss = tf.reduce_mean(
+            tf.reduce_mean(tf.square(pred_images - true_images), axis=[1,2,3])
+        )
+        if self.ae_type == 'variational':
+            if self.scaled:
+                prior_var = tf.constant(1.0/mus.shape[1], dtype=tf.float32)
+            else:
+                prior_var = tf.constant(1.0, dtype=tf.float32)
+            kl_loss = tf.reduce_mean(
+                tf.reduce_mean(
+                    tf.exp(2*logstds)/prior_var + (mus**2)/prior_var - \
+                          (2*logstds-tf.math.log(prior_var)),
+                    axis=-1
+                )
+            )
+        else:
+            kl_loss = None
+        return acc, recon_loss, kl_loss
         
     @tf.function
     def test_step(
@@ -342,7 +401,18 @@ class WassersteinDomainLearnerTrainer:
         """
         true_images = test_labels[0]
         true_properties = test_labels[1]
-        pred_images, pred_properties, _ = self.model(test_data, training=False)
+        if self.ae_type == 'standard':
+            pred_images, pred_properties, _ = self.model(
+                test_data, 
+                training=False
+            )
+        elif self.ae_type == 'variational':
+            pred_images, pred_properties, _, logstds, mus = self.model(
+                test_data,
+                training=False
+            )
+        else:
+            raise ValueError("Invalid autoencoder type.")
         acc = tf.reduce_mean(
             tf.cast(
                 tf.equal(
@@ -352,8 +422,24 @@ class WassersteinDomainLearnerTrainer:
                 tf.float32
             )
         )
-        recon_loss = tf.reduce_mean(tf.square(pred_images - true_images))
-        return acc, recon_loss
+        recon_loss = tf.reduce_mean(
+            tf.reduce_mean(tf.square(pred_images - true_images), axis=[1,2,3])
+        )
+        if self.ae_type == 'variational':
+            if self.scaled:
+                prior_var = tf.constant(1.0/mus.shape[1], dtype=tf.float32)
+            else:
+                prior_var = tf.constant(1.0, dtype=tf.float32)
+            kl_loss = tf.reduce_mean(
+                tf.reduce_mean(
+                    tf.exp(2*logstds)/prior_var + (mus**2)/prior_var - \
+                          (2*logstds-tf.math.log(prior_var)),
+                    axis=-1
+                )
+            )
+        else:
+            kl_loss = None
+        return acc, recon_loss, kl_loss
  
     def fit(
             self,
@@ -367,7 +453,8 @@ class WassersteinDomainLearnerTrainer:
             mu: float,
             steps_per_epoch: int,
             validation_steps: int,
-            proto_update_step_size: int
+            proto_update_step_size: int,
+            fixed_prototypes: bool = False
         ) -> dict:
         """
         Method to perform the full training loop.
@@ -401,6 +488,9 @@ class WassersteinDomainLearnerTrainer:
             The number of steps per epoch in the training data loader.
         proto_update_step_size : int
             The number of batches to use for the prototype update.
+        fixed_prototypes : bool, optional
+            Whether to keep the prototypes fixed during training.
+            Default is False.
 
         Returns
         -------
@@ -412,7 +502,8 @@ class WassersteinDomainLearnerTrainer:
             - 'val_accuracy': a list of the validation accuracy at each epoch
             - 'val_lr': a list of the validation reconstruction loss each epoch
         """
-        history = {'accuracy': [], 'lr': [], 'val_accuracy': [], 'val_lr': []}
+        history = {'accuracy': [], 'lr': [], 'val_accuracy': [], 'val_lr': [],
+                   'kl_div': [], 'val_kl_div': []}
         if steps_per_epoch is None:
             steps_per_epoch = train_size // batch_size + 1
         dataset_iter = iter(training_loader)
@@ -420,7 +511,7 @@ class WassersteinDomainLearnerTrainer:
         print('\nStarting training for domain learner with Wasserstein loss...')
         for epoch in range(epochs):
             print(f'\nEpoch: {epoch+1}/{epochs}')
-            print(f'Learning rate: {self.optimizer.lr.numpy()}')
+            print(f'Learning rate: {self.optimizer.learning_rate.numpy()}')
 
             # set the beta parameter based on the current epoch
             if epoch < warmup:
@@ -431,17 +522,24 @@ class WassersteinDomainLearnerTrainer:
             # training
             acc = 0
             recon_loss = 0
+            kl_div = 0
             for step in tqdm(range(steps_per_epoch), desc='Batches', ncols=80):
                 data, labels = next(dataset_iter)
-                a, l = self.train_step(data, labels)
+                a, l, kl = self.train_step(data, labels)
                 acc += a
                 recon_loss += l
+                kl_div += kl if kl is not None else 0
             acc = acc.numpy()/steps_per_epoch
             recon_loss = recon_loss.numpy()/steps_per_epoch
+            kl_div = kl_div.numpy()/steps_per_epoch if kl_div != 0 else None
             history['accuracy'].append(acc)
             history['lr'].append(recon_loss)
+            if kl is not None:
+                history['kl_div'].append(kl_div)
             print(f'Training accuracy = {np.round(acc*100,2)}%')
             print(f'Training reconstruction loss = {np.round(recon_loss,2)}')
+            if kl is not None:
+                print(f'Training KL divergence = {np.round(kl_div,2)}')
 
             # validation
             print('Testing on the validation set...', end=' ')
@@ -449,31 +547,39 @@ class WassersteinDomainLearnerTrainer:
                 validation_steps = valid_size // batch_size + 1
             acc = 0
             recon_loss = 0
+            kl_div = 0
             for step in range(validation_steps):
                 data, labels = next(valid_iter)
-                a, l = self.test_step(data, labels)
+                a, l, kl = self.test_step(data, labels)
                 acc += a
                 recon_loss += l
+                kl_div += kl if kl is not None else 0
             acc = acc.numpy()/validation_steps
             recon_loss = recon_loss.numpy()/validation_steps
+            kl_div = kl_div.numpy()/validation_steps if kl_div != 0 else None
             history['val_accuracy'].append(acc)
             history['val_lr'].append(recon_loss)
+            if kl is not None:
+                history['val_kl_div'].append(kl_div)
             print(f'accuracy = {np.round(acc*100,2)}%')
             print(f'reconstruction loss = {np.round(recon_loss,2)}')
+            if kl is not None:
+                print(f'KL divergence = {np.round(kl_div,2)}')
 
             # update prototypes
-            new_protos = domain_learner_update_prototypes(
-                old_prototypes=self.model.protos.numpy(),
-                encoder=self.encoder,
-                training_loader=training_loader,
-                autoencoder_type='standard', # TODO: add VAE at some point
-                mu=0.0 if epoch < warmup else mu,
-                proto_update_type='average',
-                batches=proto_update_step_size,
-                steps_per_epoch=steps_per_epoch,
-                verbose=True
-            )
-            self.model.protos.assign(new_protos)
+            if not fixed_prototypes:
+                new_protos = domain_learner_update_prototypes(
+                    old_prototypes=self.model.protos.numpy(),
+                    encoder=self.encoder,
+                    training_loader=training_loader,
+                    autoencoder_type=self.ae_type,
+                    mu=0.0 if epoch < warmup else mu,
+                    proto_update_type='average',
+                    batches=proto_update_step_size,
+                    steps_per_epoch=steps_per_epoch,
+                    verbose=True
+                )
+                self.model.protos.assign(new_protos)
             
             # if no M given, update M with new prototypes
             # - this uses the Euclidean distance for now
@@ -575,6 +681,103 @@ def get_mse_gradient(
         for *each sample* in the batch (not aggregated).
     """
     return 2*(y_pred - y_true)
+
+# ------------------------------------------------------------------------------
+
+def get_vae_lr_gradient(
+        y_true: tf.Tensor,
+        y_pred: tf.Tensor
+    ) -> tf.Tensor:
+    """
+    This function computes the gradient of the reconstruction loss term of the 
+    overall ELBO loss for the VAE.
+
+    The resulting gradient is that of the loss with respect to the output image
+    variables, which can the be used to backpropagate through the model.
+
+    Parameters
+    ----------
+    y_true : tf.Tensor
+        True images.
+    y_pred : tf.Tensor
+        Predicted images.
+
+    Returns
+    -------
+    tf.Tensor
+        The gradient of the image reconstruction loss. This is a tensor of the
+        same shape as y_true and y_pred, i.e., it is the gradient of the loss
+        for *each sample* in the batch (not aggregated).
+    """
+    return 2*(y_pred - y_true)
+
+# ------------------------------------------------------------------------------
+
+def get_vae_kl_mu_gradient(
+        mu: tf.Tensor,
+        scaled_prior: bool
+    ) -> tf.Tensor:
+    """
+    This function computes the gradient of the KL divergence term of the overall
+    ELBO loss for the VAE with respect to the mean parameter.
+
+    The resulting gradient is that of the loss with respect to the mean
+    parameter, which can then be used to backpropagate through the model.
+
+    Parameters
+    ----------
+    mu : tf.Tensor
+        The mean parameter of the VAE.
+    scaled_prior : bool
+        Whether to use the scaled prior for the KL divergence term.
+
+    Returns
+    -------
+    tf.Tensor
+        The gradient of the KL divergence loss with respect to the mean
+        parameter. This is a tensor of the same shape as mu, i.e., it is the
+        gradient of the loss for *each sample* in the batch (not aggregated).
+    """
+    if scaled_prior:
+        prior_var = tf.constant(1.0/mu.shape[1], dtype=tf.float32)
+    else:
+        prior_var = tf.constant(1.0, dtype=tf.float32)
+    return 2*mu/prior_var
+
+# ------------------------------------------------------------------------------
+
+def get_vae_kl_logstd_gradient(
+        logstd: tf.Tensor,
+        scaled_prior: bool
+    ) -> tf.Tensor:
+    """
+    This function computes the gradient of the KL divergence term of the overall
+    ELBO loss for the VAE with respect to the log standard deviation parameter.
+
+    The resulting gradient is that of the loss with respect to the log standard
+    deviation parameter, which can then be used to backpropagate through the
+    model.
+
+    Parameters
+    ----------
+    logstd : tf.Tensor
+        The log standard deviation parameter of the VAE.
+    scaled_prior : bool
+        Whether to use the scaled prior for the KL divergence term.
+
+    Returns
+    -------
+    tf.Tensor
+        The gradient of the KL divergence loss with respect to the log standard
+        deviation parameter. This is a tensor of the same shape as logstd, i.e.,
+        it is the gradient of the loss for *each sample* in the batch (not
+        aggregated).
+    """
+    if scaled_prior:
+        prior_var = tf.constant(1.0/logstd.shape[1], dtype=tf.float32)
+    else:
+        prior_var = tf.constant(1.0, dtype=tf.float32)
+    return 2*(tf.exp(2*logstd)/prior_var - 1)
 
 # ------------------------------------------------------------------------------
 

@@ -17,7 +17,7 @@ from .layers import SmallResNetBlock, SmallDeResNetBlock
 from .layers import ResNetBlock, DeResNetBlock
 from .layers import ReparameterizationLayer
 
-layers = tf.keras.layers
+from keras import layers, saving
 
 # ------------------------------------------------------------------------------
 
@@ -161,8 +161,16 @@ class ConvEncoder(tf.keras.models.Model):
     def call(self, inputs, training=False):
         x = inputs
         for layer in self.layers_list:
-            x = layer(x, training=training)
+            if layer.name == 'input_layer':
+                continue
+            else:
+                x = layer(x, training=training)
         return x
+    
+    def summary(self):
+        x = tf.keras.Input(shape=(self.ip_shape))
+        model = tf.keras.models.Model(inputs=[x], outputs=self.call(x))
+        return model.summary()
     
     def get_config(self):
         config = super(ConvEncoder, self).get_config()
@@ -292,6 +300,8 @@ class ConvDecoder(tf.keras.models.Model):
         self.d_list = d_list
         self.dense_size = first_channels
 
+        self.ip_shape = (code_size,)
+
         self.layers_list = []
 
         self.layers_list.append(
@@ -345,6 +355,11 @@ class ConvDecoder(tf.keras.models.Model):
         for layer in self.layers_list:
             x = layer(x, training=training)
         return x
+    
+    def summary(self):
+        x = tf.keras.Input(shape=(self.ip_shape))
+        model = tf.keras.models.Model(inputs=[x], outputs=self.call(x))
+        return model.summary()
 
     def get_config(self):
         config = super(ConvDecoder, self).get_config()
@@ -361,13 +376,22 @@ class ConvDecoder(tf.keras.models.Model):
             'dense_size': self.dense_size,
             'd_list': self.d_list,
             'dropout': self.dropout,
+            'encoder': saving.serialize_keras_object(self.encoder)
         })
         return config
+    
+    @classmethod
+    def from_config(cls, config):
+        submodel_config = config.pop('encoder')
+        submodel = saving.deserialize_keras_object(submodel_config)
+        return cls(encoder=submodel, **config)
 
     def get_dimensions(self, encoder):
         d_list = []
-        shape = encoder.input_layer.get_input_shape_at(0)
+        shape = (None,) + encoder.ip_shape
         for layer in encoder.layers:
+            if 'input' in layer.name:
+                continue
             shape = layer.compute_output_shape(shape)
             if 'convolution' in layer.name:
                 d_list.append(shape[1])
@@ -1668,14 +1692,21 @@ class Classifier(tf.keras.models.Model):
         return x
 
     def get_config(self):
-        config = super(Classifier, self).get_config()
-        config.update({
+        base_config = super().get_config()
+        config = {
             'num_classes': self.num_classes,
+            'encoder': saving.serialize_keras_object(self.encoder),
             'output_activation': self.op_act,
             'use_awgn': self.use_awgn,
             'awgn_variance': self.awgn_variance,
-        })
-        return config
+        }
+        return {**base_config, **config}
+    
+    @classmethod
+    def from_config(cls, config):
+        submodel_config = config.pop('encoder')
+        submodel = saving.deserialize_keras_object(submodel_config)
+        return cls(encoder=submodel, **config)
 
 
 # ------------------------------------------------------------------------------
@@ -1818,6 +1849,8 @@ class DomainLearnerModel(tf.keras.models.Model):
         self.latent_dim = latent_dimension
         self.ae_type = autoencoder_type
 
+        self.ip_shape = encoder.ip_shape
+
         if self.use_awgn:
             self.awgn_layer = AWGNLayer(self.awgn_variance)
 
@@ -1869,6 +1902,7 @@ class DomainLearnerModel(tf.keras.models.Model):
             metric_matrix: Optional[np.array] = None,
             wasserstein_lam: float = 1.0,
             wasserstein_p: float = 1.0,
+            scaled_prior: bool = False,
             **kwargs
         ):
         """
@@ -1895,6 +1929,8 @@ class DomainLearnerModel(tf.keras.models.Model):
         self.alpha = alpha
         self.beta_val = beta
         self.beta = tf.Variable(beta, trainable=False)
+        self.lam = lam
+        self.scaled_prior = scaled_prior
 
         if loss == 'wasserstein':
             if metric_matrix is not None:
@@ -1946,23 +1982,35 @@ class DomainLearnerModel(tf.keras.models.Model):
 
         # get the reconstructed input with the autoencoder decoder
         if self.ae_type == 'variational':
-            log_stds, mus, features = self.reparam_layer(features)
+            outputs = self.reparam_layer(features)
+            if isinstance(outputs, list):
+                log_stds, mus, features = outputs
+            else:
+                features = outputs
             reconstructed = self.decoder(features)
         elif self.ae_type == 'standard':
             reconstructed = self.decoder(features)
         else:
-            raise ValueError('Gor invalid autoencoder_type')
+            raise ValueError('Got invalid autoencoder_type')
 
         # get the distances and similarity-based predictions
         distances = self.distance_layer(features)
         properties = self.soft_sim_layer(distances)
 
         if self.ae_type == 'variational':
-            return [reconstructed, properties, distances, log_stds, mus]
+            if isinstance(outputs, list):
+                return [reconstructed, properties, distances, log_stds, mus]
+            else:
+                return [reconstructed, properties, distances]
         elif self.ae_type == 'standard':
             return [reconstructed, properties, distances]
         else:
             raise ValueError('Got invalid autoencoder_type')
+        
+    def summary(self):
+        x = tf.keras.Input(shape=(self.ip_shape))
+        model = tf.keras.models.Model(inputs=[x], outputs=self.call(x))
+        return model.summary()
 
     def train_step(self, data):
         x, y = data
@@ -2124,11 +2172,18 @@ class DomainLearnerModel(tf.keras.models.Model):
             predicted_sigma
         )
 
-        mu_sum = tf.reduce_sum(tf.square(predicted_mu), axis=-1)
-        log_sum = -tf.reduce_sum(stable_log_stds, axis=-1)
-        var_sum = tf.reduce_sum(tf.square(stds), axis=-1)
+        if self.scaled_prior:
+            prior_var = tf.constant(1.0/self.latent_dim, dtype=tf.float32)
+        else:
+            prior_var = tf.constant(1.0, dtype=tf.float32)
+
+        mu_sum = tf.reduce_sum(tf.square(predicted_mu)/prior_var, axis=-1)
+        var_sum = tf.reduce_sum(tf.square(stds)/prior_var, axis=-1)
+        log_sum = tf.reduce_sum(
+            2*stable_log_stds-tf.math.log(prior_var), axis=-1
+        )
         
-        loss = log_sum + 0.5*(mu_sum + var_sum - self.latent_dim)
+        loss = mu_sum + var_sum - log_sum
 
         return loss
 
@@ -2244,6 +2299,7 @@ class VariationalAutoencoder(tf.keras.models.Model):
     def compile(
             self,
             lam: float = 1.0,
+            scaled_prior: bool = False,
             **kwargs
         ):
         """
@@ -2256,10 +2312,15 @@ class VariationalAutoencoder(tf.keras.models.Model):
             Hyperparameter controlling the scale of the KL divergence loss.
             This is the assumed variance for each of the output variables.
             Default value is 1.0.
+        scaled_prior : bool, optional
+            Whether to scale the loss term based on the prior by the latent
+            dimension. Basically, this sets the prior distribution over the 
+            latent features to be normal with 0 mean and 1/latent_dim variance.
         other arguments
             Other arguments to pass to tf.keras.models.Model.compile().
         """
         super(VariationalAutoencoder, self).compile(**kwargs)
+        self.scaled_prior = scaled_prior
         self.lam = lam
 
     def call(self, inputs, training=False):
@@ -2282,7 +2343,7 @@ class VariationalAutoencoder(tf.keras.models.Model):
 
             recon_loss = tf.reduce_mean(recon_term)
             kl_loss = tf.reduce_mean(kl_term)
-            loss = -(recon_loss - self.lam*kl_loss)
+            loss = recon_loss + self.lam*kl_loss
 
         # compute gradients and apply them
         grads = tape.gradient(loss, self.trainable_variables)
@@ -2290,7 +2351,7 @@ class VariationalAutoencoder(tf.keras.models.Model):
 
         return {
             "loss": loss,
-            "r_loss": -recon_loss,
+            "r_loss": recon_loss,
             "kl_term": kl_loss
         }
 
@@ -2303,11 +2364,11 @@ class VariationalAutoencoder(tf.keras.models.Model):
         
         recon_loss = tf.reduce_mean(recon_term)
         kl_loss = tf.reduce_mean(kl_term)
-        loss = -(recon_loss - self.lam*kl_loss)
+        loss = recon_loss + self.lam*kl_loss
 
         return {
             "loss": loss,
-            "r_loss": -recon_loss,
+            "r_loss": recon_loss,
             "kl_term": kl_loss
         }
 
@@ -2334,7 +2395,7 @@ class VariationalAutoencoder(tf.keras.models.Model):
         loss : float
             The loss for each data point. Will be a tensor of shape (None,).
         """
-        loss = -tf.reduce_sum(tf.square(y_true - y_pred), axis=[1,2,3])
+        loss = tf.reduce_sum(tf.square(y_true - y_pred), axis=[1,2,3])
 
         return loss
 
@@ -2359,7 +2420,7 @@ class VariationalAutoencoder(tf.keras.models.Model):
             The loss for each data point. Will be a tensor of shape (None,).
         """
         # define a small minimum std. dev. to stabilize the computations
-        k = tf.constant(1e-3, dtype=tf.float32)
+        k = tf.constant(1e-6, dtype=tf.float32)
 
         stds = tf.exp(predicted_sigma) + k
         stable_log_stds = tf.where(
@@ -2368,11 +2429,18 @@ class VariationalAutoencoder(tf.keras.models.Model):
             predicted_sigma
         )
 
-        mu_sum = tf.reduce_sum(tf.square(predicted_mu), axis=-1)
-        log_sum = -tf.reduce_sum(stable_log_stds, axis=-1)
-        var_sum = tf.reduce_sum(tf.square(stds), axis=-1)
+        if self.scaled_prior:
+            prior_var = tf.constant(1.0/self.latent_dim, dtype=tf.float32)
+        else:
+            prior_var = tf.constant(1.0, dtype=tf.float32)
+
+        mu_sum = tf.reduce_sum(tf.square(predicted_mu)/prior_var, axis=-1)
+        var_sum = tf.reduce_sum(tf.square(stds)/prior_var, axis=-1)
+        log_sum = tf.reduce_sum(
+            2*stable_log_stds-tf.math.log(prior_var), axis=-1
+        )
         
-        loss = log_sum + 0.5*(mu_sum + var_sum - self.latent_dim)
+        loss = mu_sum + var_sum - log_sum
 
         return loss
 

@@ -53,6 +53,10 @@ class ImageLearningController():
     buffer_size = 10000         # Buffer size for training
     autoencoder_type = 'standard' # Type of autoencoder to use
 
+    model = None                # The main model object
+    encoder = None              # The encoder model object
+    decoder = None              # The decoder model object
+
     wass_train = False          # Whether to use the Wasserstein loss
 
     debug_mode = False          # Whether to use the debug mode
@@ -361,10 +365,21 @@ class ImageLearningController():
         self.params['latent_dim'] = latent_dim
         self.params['architecture'] = architecture
         self.params['autoencoder_type'] = autoencoder_type
-        if self.learner_type == 'domain_learner':
-            self.params['distance'] = distance
-            self.params['similarity'] = similarity
-            self.params['similarity_c'] = similarity_c
+        self.params['number_of_blocks'] = number_of_blocks
+        self.params['filters'] = filters
+        self.params['kernel_sizes'] = kernel_sizes
+        self.params['strides'] = strides
+        self.params['use_maxpool'] = use_maxpool
+        self.params['hidden_activation'] = hidden_activation
+        self.params['latent_activation'] = latent_activation
+        self.params['output_activation'] = output_activation
+        self.params['global_pool_type'] = global_pool_type
+        self.params['dropout'] = dropout
+        self.params['use_awgn'] = use_awgn
+        self.params['awgn_variance'] = awgn_variance
+        self.params['distance'] = distance
+        self.params['similarity'] = similarity
+        self.params['similarity_c'] = similarity_c
 
         # get the appropriate internal method for creating the models
         if self.learner_type == 'classifier':
@@ -418,7 +433,8 @@ class ImageLearningController():
             sch_warmup_steps: Optional[int] = None,
             metric_matrix: Optional[np.ndarray] = None,
             wasserstein_lam: Optional[float] = 1.0,
-            wasserstein_p: Optional[float] = 1.0
+            wasserstein_p: Optional[float] = 1.0,
+            scaled_prior: Optional[bool] = False
         ):
         """
         Method for compiling the models. This method should be called after
@@ -498,6 +514,10 @@ class ImageLearningController():
             The exponent for the distance metric in the Wasserstein loss.
             To get a valid metric, this should be >= 1.
             Default is 1.0.
+        scaled_prior : bool, optional
+            Whether to use the scaled prior for the VAE.
+            Only used for the variational autoencoder/domain learner.
+            Default is False.
         """
         # check that the models have been created or loaded
         assert self.models_created or self.models_loaded, \
@@ -557,7 +577,8 @@ class ImageLearningController():
             schedule=schedule,
             metric_matrix=metric_matrix,
             wasserstein_lam=wasserstein_lam,
-            wasserstein_p=wasserstein_p
+            wasserstein_p=wasserstein_p,
+            scaled_prior=scaled_prior
         )
 
         # set flag to indicate that models have been compiled
@@ -586,43 +607,69 @@ class ImageLearningController():
         # get the files in the learner directory
         files = os.listdir(learner_path)
 
-        # load in the models based on the files in the directory
+        # load in the model parameters
         if 'params.json' in files:
             with open(learner_path + 'params.json', 'r') as f:
                 self.params = json.load(f)
         else:
             raise ValueError("Could not find the params.json file.")
         
-        # set the loaded parameters as attributes
-        for key, value in self.params.items():
-            setattr(self, key, value)
-
-        for file in files:
-            if 'classifier' in file:
-                self.model = tf.keras.models.load_model(learner_path + file)
-                self.encoder = self.model.get_layer('encoder')
-                self.models_loaded = True
-                self.encoder_loaded = True
-            elif 'autoencoder' in file:
-                self.model = tf.keras.models.load_model(learner_path + file)
-                self.encoder = self.model.get_layer('encoder')
-                self.decoder = self.model.get_layer('decoder')
-                self.models_loaded = True
-                self.encoder_loaded = True
-                self.decoder_loaded = True
-            elif 'domainLearner' in file:
-                self.model = tf.keras.models.load_model(learner_path + file)
-                self.encoder = self.model.get_layer('encoder')
-                self.decoder = self.model.get_layer('decoder')
-                self.models_loaded = True
-                self.encoder_loaded = True
-                self.decoder_loaded = True
+        # if a domain learner, load in the prototypes
+        if self.learner_type in ['domain_learner']:
+            if 'prototypes.npy' in files:
                 self.prototypes = np.load(learner_path + 'prototypes.npy')
-            elif 'prototypes' in file:
-                proto_path = learner_path + file
-                self.prototypes = np.load(proto_path)
             else:
-                pass
+                self.prototypes = np.random.normal(
+                    size=(
+                        self.number_of_properties,
+                        self.params['latent_dim']
+                    )
+                )
+        else:
+            self.prototypes = None
+
+        # create the model architecture based on the params
+        self.create_learner(
+            latent_dim=self.params['latent_dim'],
+            architecture=self.params['architecture'],
+            autoencoder_type=self.params['autoencoder_type'],
+            number_of_blocks=self.params['number_of_blocks'],
+            filters=self.params['filters'],
+            kernel_sizes=self.params['kernel_sizes'],
+            strides=self.params['strides'],
+            use_maxpool=self.params['use_maxpool'],
+            hidden_activation=self.params['hidden_activation'],
+            latent_activation=self.params['latent_activation'],
+            output_activation=self.params['output_activation'],
+            global_pool_type=self.params['global_pool_type'],
+            dropout=self.params['dropout'],
+            use_awgn=self.params['use_awgn'],
+            awgn_variance=self.params['awgn_variance'],
+            distance=self.params['distance'],
+            similarity=self.params['similarity'],
+            similarity_c=self.params['similarity_c'],
+            initial_protos=self.prototypes,
+        )
+
+        # make sure the model is built before loading in weights
+        for data, labels in self.training_loader.take(1):
+            data = data.numpy()
+            labels = labels[1].numpy()
+        self.model(data)
+        
+        # if the learner type is the same, load in the models
+        if self.params['learner_type'] == self.learner_type:
+            self.model.load_weights(learner_path + 'model.weights.h5')
+        # else, only load in the encoder/decoder weights as needed
+        else:
+            self.encoder.load_weights(learner_path + 'encoder.weights.h5')
+            if self.decoder_created:
+                self.decoder.load_weights(learner_path + 'decoder.weights.h5')
+
+        # set flag to indicate that models have been loaded
+        self.models_loaded = True
+        self.encoder_loaded = True if self.encoder_created else False
+        self.decoder_loaded = True if self.decoder_created else False
 
     def train_learner(
             self,
@@ -638,7 +685,8 @@ class ImageLearningController():
             log_experiment: Optional[bool] = False,
             proto_plot_save_path: Optional[str] = None,
             proto_plot_colors: Optional[list] = None,
-            proto_plot_legend: Optional[list] = None
+            proto_plot_legend: Optional[list] = None,
+            fixed_prototypes: Optional[bool] = False
         ):
         """
         Method for training the learner. This method should be called after
@@ -695,6 +743,10 @@ class ImageLearningController():
             A list of strings to use for the prototype plots legend.
             Only applies to domain learning.
             Default is None.
+        fix_prototypes : bool, optional
+            Whether to fix the prototypes during training.
+            Only applies to domain learning.
+            Default is False.
         """
 
         # check that the models have been compiled
@@ -756,7 +808,8 @@ class ImageLearningController():
                 warmup=warmup,
                 proto_plot_save_path=proto_plot_save_path,
                 proto_plot_colors=proto_plot_colors,
-                proto_plot_legend=proto_plot_legend
+                proto_plot_legend=proto_plot_legend,
+                fixed_prototypes=fixed_prototypes
             )
 
     def save_models(
@@ -788,21 +841,17 @@ class ImageLearningController():
         # save the parameter dictionary
         with open(save_path + 'params.json', 'w') as f:
             json.dump(self.params, f)
-        
-        # save the models based on the learner type
-        if self.learner_type == 'classifier':
-            path = utils.get_unused_name(save_path+'classifier')
-            self.model.save(path)
-        elif self.learner_type == 'autoencoder':
-            path = utils.get_unused_name(save_path+'autoencoder')
-            self.model.save(path)
-        elif self.learner_type == 'domain_learner':
-            m_path = utils.get_unused_name(save_path+'domainLearner')
-            self.model.save(m_path)
-            p_path = utils.get_unused_name(save_path+'prototypes')
-            np.save(p_path, self.prototypes)
-        else:
-            raise ValueError("Got invalid learner type.")
+
+        # save the model weights
+        self.model.save_weights(save_path + 'model.weights.h5')
+        if self.encoder is not None:
+            self.encoder.save_weights(save_path + 'encoder.weights.h5')
+        if self.decoder is not None:
+            self.decoder.save_weights(save_path + 'decoder.weights.h5')
+
+        # save the prototypes
+        if self.learner_type == 'domain_learner':
+            np.save(save_path + 'prototypes.npy', self.prototypes)
         
         print(f'Models saved to {save_path}.')
 
@@ -963,6 +1012,79 @@ class ImageLearningController():
         if show:
             plt.show(block=block)
 
+    def eval_compare_latent_prior(
+            self,
+            show: Optional[bool] = True,
+            save_path: Optional[str] = None,
+            block: Optional[bool] = True
+        ):
+        """
+        Method for comparing the latent space prior to the learned latent space.
+        """
+        # check that the models have been trained or loaded
+        if not self.models_trained and not self.models_loaded:
+            print("Models have not been trained or loaded. Skipping...")
+            return
+        
+        loader = self.eval_loader
+        set_size = self.valid_size
+        
+        # get the prior distribution
+        if self.model.scaled_prior:
+            var = 1.0/self.latent_dim
+            std = np.sqrt(var)
+        else:
+            var = 1.0
+            std = 1.0
+        x_lim = 5*std
+        x = np.linspace(-x_lim, x_lim, 250)
+        f = (1/np.sqrt(2*np.pi*var)) * np.exp(-0.5*(x**2)/var)
+
+        # get the learned latent features
+        features = np.empty((0, self.latent_dim))
+        total = 0
+        for batch_data, batch_labels in loader:
+            batch_features = self.encoder.predict(batch_data, verbose=0)
+            if self.autoencoder_type == 'variational':
+                    batch_features = layers.ReparameterizationLayer(
+                        latent_dim=self.latent_dim
+                    )(batch_features)[2]
+            features = np.append(features, batch_features, axis=0)
+            total += len(batch_labels)
+            print(f'\rComputing features ({total}/{set_size})', end='')
+            if total >= set_size:
+                break
+        print('\nDone.')
+
+        # clip the features to the same range as the prior
+        features = np.clip(features, -x_lim, x_lim)
+
+        # plot the prior density and histogram of the learned latent features
+        plt.figure(figsize=(10, 5))
+        plt.plot(x, f, label='Prior')
+        plt.hist(
+            features.flatten(), 
+            bins=50, 
+            density=True, 
+            alpha=0.5, 
+            label='Learned'
+        )
+
+        # set the plot labels
+        plt.xlabel('Latent Feature Value')
+        plt.ylabel('Density')
+        plt.legend()
+        plt.grid()
+
+        # save the plot with an unused file name if a save path is provided
+        if save_path is not None:
+            vacant_save_path = utils.get_unused_name(save_path)
+            plt.savefig(vacant_save_path)
+
+        # show the plot
+        if show:
+            plt.show(block=block)
+
     def eval_plot_scattered_features(
             self,
             which: Optional[str] = 'validation',
@@ -1002,11 +1124,6 @@ class ImageLearningController():
             print("Models have not been trained or loaded. Skipping...")
             return
         
-        # make sure that features are either 2D or 3D
-        if self.latent_dim != 2 and self.latent_dim != 3:
-            print("(eval_plot_scattered_features) " + \
-                "Features must be either 2D or 3D. Skipping...")
-            return
         
         # do some parameter checking
         if which not in ['training', 'validation']:
@@ -1032,34 +1149,26 @@ class ImageLearningController():
         # get the features and labels from the data loader
         if self.latent_dim == 2:
             features = np.empty((0,2))
-            labels = np.empty((0, self.number_of_properties))
-            total = 0
-            for batch_data, batch_labels in loader:
-                batch_features = self.encoder.predict(batch_data, verbose=0)
-                if self.autoencoder_type == 'variational':
-                        batch_features = layers.ReparameterizationLayer(
-                            latent_dim=self.latent_dim
-                        )(batch_features)[2]
-                features = np.append(features, batch_features, axis=0)
-                labels = np.append(labels, batch_labels, axis=0)
-                total += len(batch_labels)
-                print(f'\rComputing features ({total}/{set_size})', end='')
-            print('\nDone.')
-        if self.latent_dim == 3:
+        elif self.latent_dim == 3:
             features = np.empty((0,3))
-            labels = np.empty((0, self.number_of_properties))
-            print('Computing features...')
-            for batch_data, batch_labels in loader:
-                batch_features = self.encoder.predict(batch_data, verbose=0)
-                if self.autoencoder_type == 'variational':
-                        batch_features = layers.ReparameterizationLayer(
-                            latent_dim=self.latent_dim
-                        )(batch_features)[2]
-                features = np.append(features, batch_features, axis=0)
-                labels = np.append(labels, batch_labels, axis=0)
-                total += len(batch_labels)
-                print(f'\rComputing features ({total}/{set_size})', end='')
-            print('\nDone.')
+        else:
+            print("Features must be either 2D or 3D. Skipping...")
+            return
+        labels = np.empty((0, self.number_of_properties))
+        total = 0
+        for batch_data, batch_labels in loader:
+            batch_features = self.encoder.predict(batch_data, verbose=0)
+            if self.autoencoder_type == 'variational':
+                    batch_features = layers.ReparameterizationLayer(
+                        latent_dim=self.latent_dim
+                    )(batch_features)[2]
+            features = np.append(features, batch_features, axis=0)
+            labels = np.append(labels, batch_labels, axis=0)
+            total += len(batch_labels)
+            print(f'\rComputing features ({total}/{set_size})', end='')
+            if total >= set_size:
+                break
+        print('\nDone.')
 
         # pass to the method for plotting the features
         vis.plot_scattered_features(
@@ -1389,6 +1498,8 @@ class ImageLearningController():
             features = np.append(features, batch_features, axis=0)
             total += len(batch_data)
             print(f'\rComputing features ({total}/{set_size})', end='')
+            if total >= set_size:
+                break
         print('\nDone.')
 
         # get min and max vals if not entered
@@ -1432,9 +1543,12 @@ class ImageLearningController():
             The number of steps to take between the min and max values.
             Default is 10.
         fixed_dims : list, optional
-            A list of fixed values for the other dimensions.
-            If None, the other dimensions are fixed at 0.
-            Default is None.
+            A list of dimensions to fix.
+            If specified, list should be of length n_features.
+            If not specified, all other dimensions are either fixed at their
+            respective means, or are randomly chosen if is_random_fixed_dims
+            is True.
+        Default value is None.
         is_random_fixed_dims : bool, optional
             Whether to randomly choose the fixed dimensions.
             Default is False.
@@ -1476,6 +1590,8 @@ class ImageLearningController():
             features = np.append(features, batch_features, axis=0)
             total += len(batch_data)
             print(f'\rComputing features ({total}/{set_size})', end='')
+            if total >= set_size:
+                break
         print('\nDone.')
 
         vis.visualize_all_dimensions(
@@ -1525,11 +1641,14 @@ class ImageLearningController():
                 "Skipping...")
             return
         
+        set_size = self.valid_size
+        
         # get the encoded features
         print('Computing features...')
         features = np.empty((0, self.latent_dim))
         labels = np.empty((0, self.number_of_properties))
         i = 0
+        total = 0
         for batch_data, batch_labels in self.validation_loader:
             batch_features = self.encoder.predict(batch_data, verbose=0)
             if self.autoencoder_type == 'variational':
@@ -1539,6 +1658,9 @@ class ImageLearningController():
             labels = np.append(labels, batch_labels[1], axis=0)
             features = np.append(features, batch_features, axis=0)
             print(i)
+            total += len(batch_labels)
+            if total >= set_size:
+                break
             i += 1
 
         # call the method for plotting the similarity histograms
@@ -2245,6 +2367,7 @@ class ImageLearningController():
             metrics: list,
             lam: float,
             schedule: tf.keras.optimizers.schedules.LearningRateSchedule,
+            scaled_prior: bool,
             **kwargs
         ):
         
@@ -2283,7 +2406,8 @@ class ImageLearningController():
                 loss=loss,
                 optimizer=optimizer,
                 metrics=metrics,
-                lam=lam
+                lam=lam,
+                scaled_prior=scaled_prior
             )
         else:
             raise ValueError("Got invalid autoencoder type.")
@@ -2307,6 +2431,7 @@ class ImageLearningController():
             metric_matrix: np.ndarray,
             wasserstein_lam: float,
             wasserstein_p: float,
+            scaled_prior: bool,
             **kwargs
         ):
 
@@ -2336,7 +2461,8 @@ class ImageLearningController():
                 metrics=metrics,
                 metric_matrix=metric_matrix,
                 wasserstein_lam=wasserstein_lam,
-                wasserstein_p=wasserstein_p
+                wasserstein_p=wasserstein_p,
+                scaled_prior=scaled_prior
             )
         else:
             raise ValueError("Invalid learner type.")
@@ -2424,13 +2550,15 @@ class ImageLearningController():
             proto_plot_save_path: Optional[str],
             proto_plot_colors: Optional[list],
             proto_plot_legend: Optional[list],
+            fixed_prototypes: Optional[bool],
             **kwargs
         ):
 
         if self.wass_train:
             trainer = cstrain.WassersteinDomainLearnerTrainer(
                 self.model,
-                self.encoder
+                self.encoder,
+                self.autoencoder_type
             )
             history = trainer.fit(
                 training_loader=self.training_loader,
@@ -2443,7 +2571,8 @@ class ImageLearningController():
                 mu=mu,
                 steps_per_epoch=steps_per_epoch,
                 validation_steps=validation_steps,
-                proto_update_step_size=proto_update_step_size
+                proto_update_step_size=proto_update_step_size,
+                fixed_prototypes=fixed_prototypes
             )
             self.prototypes = self.model.protos.numpy()
             self.training_history = history
@@ -2460,7 +2589,8 @@ class ImageLearningController():
                 warmup=warmup,
                 proto_plot_save_path=proto_plot_save_path,
                 proto_plot_colors=proto_plot_colors,
-                proto_plot_legend=proto_plot_legend
+                proto_plot_legend=proto_plot_legend,
+                fixed_prototypes=fixed_prototypes
             )
 
         # set flag to indicate that models have been trained
@@ -2517,7 +2647,8 @@ class ImageLearningController():
             warmup: Optional[int] = 0,
             proto_plot_save_path: Optional[str] = None,
             proto_plot_colors: Optional[list] = None,
-            proto_plot_legend: Optional[list] = None
+            proto_plot_legend: Optional[list] = None,
+            fixed_prototypes: Optional[bool] = False
         ):
         """
         Internal method for training the domain learner model.
@@ -2525,7 +2656,7 @@ class ImageLearningController():
         self.training_history = {}
 
         # initialize the prototype plotter, if specified
-        if proto_plot_save_path is not None:
+        if not fixed_prototypes and proto_plot_save_path is not None:
             save_path = utils.get_unused_name(proto_plot_save_path)
             os.mkdir(save_path)
             prototype_plotter = vis.PrototypePlotter2D(
@@ -2548,16 +2679,17 @@ class ImageLearningController():
                     print(f'\n\n\nEpoch {epoch+1}/{epochs}')
 
             # update the protos during the warmup stage (with mu=0.0)
-            if (warmup > 0) and (epoch <= warmup) and (epoch > 0):
-                self._domain_learner_update_prototypes(
-                    mu=0.0,
-                    proto_update_type=proto_update_type,
-                    batches=proto_update_step_size,
-                    verbose=True if verbose==1 else False
-                )
-                # save the prototype plots, if specified
-                if prototype_plotter is not None:
-                    prototype_plotter.update_and_save(self.prototypes)
+            if not fixed_prototypes:
+                if (warmup > 0) and (epoch <= warmup) and (epoch > 0):
+                    self._domain_learner_update_prototypes(
+                        mu=0.0,
+                        proto_update_type=proto_update_type,
+                        batches=proto_update_step_size,
+                        verbose=True if verbose==1 else False
+                    )
+                    # save the prototype plots, if specified
+                    if prototype_plotter is not None:
+                        prototype_plotter.update_and_save(self.prototypes)
 
             # update the model
             history = self._domain_learner_update_model(
@@ -2577,7 +2709,7 @@ class ImageLearningController():
                     self.training_history[key].append(history.history[key][0])
 
             # update the prototypes (if not in warmup stage)
-            if epoch > warmup-1:
+            if not fixed_prototypes and epoch > warmup-1:
                 self._domain_learner_update_prototypes(
                     mu=mu,
                     proto_update_type=proto_update_type,

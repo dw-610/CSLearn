@@ -178,8 +178,8 @@ class ClassifierFeederFromMemmap(tf.data.Dataset):
             )
         )
         if is_training:
-            ds = ds.repeat()
             ds = ds.shuffle(buffer_size=buffer_size)
+        ds = ds.repeat()
         ds = ds.batch(batch_size=batch_size)
         ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
 
@@ -515,6 +515,7 @@ class DomainLearnerFeederFromMemmap(tf.data.Dataset):
 
         # set sharding to DATA
         options = tf.data.Options()
+        options.autotune.ram_budget = 10*1024*1024*1024 # 10GB
         options.experimental_distribute.auto_shard_policy = \
             tf.data.experimental.AutoShardPolicy.OFF
         ds = ds.with_options(options)
