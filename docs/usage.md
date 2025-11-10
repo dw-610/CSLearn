@@ -173,28 +173,330 @@ None
 
 #### Optional Arguments
 
-- `loss : str (Default = 'mse')`  
-Only used if the learner_type is classifier OR autoencoder
+- `loss : str (Default = 'mse')`
+The loss function to use for training.
+Options for 'classifier' are 'categorical_crossentropy' or 'wasserstein'.
+Options for 'autoencoder' are 'mse' or 'ssim'.
+Options for 'domain_learner' are 'basic' or 'wasserstein'.
+Default is 'mse'.
 - `optimizer : str (Default = 'adam')`
+The optimizer to use for training. Currently, the only option is 'adam'.
 - `learning_rate : float (Default = 1e-3)`
+The learning rate to use for training.
+- `weight_decay : float (Default = None)`
+The strength of the weight decay to use for training. If None, no weight decay is used.
+- `clipnorm : float (Default = None)`
+If set, the gradient of each weight is individually clipped so that its norm is no higher than this value.
+- `clipvalue : float (Default = None)`
+If set, the gradient of each weight is clipped to be no higher than this value.
 - `metrics : list (Default = None)`
+A list of metrics to use for training. For example, `['accuracy']` for classifier models.
 - `alpha : float (Default = 1.0)`
+The weight for the reconstruction loss. Only used if the learner_type is 'domain_learner'.
 - `beta : float (Default = 1.0)`
+The weight for the classification loss. Only used if the learner_type is 'domain_learner'.
 - `lam : float (Default = 0.01)`
-- `gamnma : float (Default = 1.0)`
+The weight for the semantic distance regularization term. Only used if the learner_type is 'domain_learner'.
+- `schedule_type : str (Default = None)`
+String identifier for the learning rate schedule to use. Options are 'cosine' or None.
+- `sch_init_lr : float (Default = 1e-4)`
+The initial learning rate for the schedule. Only used if schedule_type is not None.
+- `sch_decay_steps : int (Default = 10000)`
+The number of steps (batches, not epochs) before decay. Only used if schedule_type is not None.
+- `sch_warmup_target : float (Default = None)`
+The target learning rate for the warmup phase. Only used if schedule_type is 'cosine'.
+- `sch_warmup_steps : int (Default = None)`
+The number of steps for the warmup phase. Only used if schedule_type is 'cosine'.
+- `metric_matrix : np.ndarray (Default = None)`
+The matrix of distances between the classes. Only used for the Wasserstein loss. For the domain_learner, if None, the matrix is dynamically computed from the prototypes learned during training.
+- `wasserstein_lam : float (Default = 1.0)`
+The balancing parameter for the Wasserstein loss. Only used when loss is 'wasserstein'.
+- `wasserstein_p : float (Default = 1.0)`
+The exponent for the distance metric in the Wasserstein loss. To get a valid metric, this should be >= 1. Only used when loss is 'wasserstein'.
+- `scaled_prior : bool (Default = False)`
+Whether to use the scaled prior for the VAE. Only used for the variational autoencoder or variational domain_learner.
 
 [(back to contents)](#contents)
 
 ### 4. Training the Learner
 
+After compiling the learner, we can train it. This is done with the `.train_learner()` method:
+
+```python
+ctrl.train_learner(epochs=10)
+```
+
+This method trains the model(s) using the data loaders that were created in step 1.
+
 #### Required Arguments
 
+None
+
 #### Optional Arguments
+
+- `epochs : int (Default = 5)`
+The number of epochs to train for.
+- `steps_per_epoch : int (Default = None)`
+The number of batches trained on per epoch. If None, the entire training dataset is used.
+- `validation_steps : int (Default = None)`
+The number of batches validated on per epoch. If None, the entire validation dataset is used.
+- `callbacks : list (Default = None)`
+A list of `tf.keras.callbacks.Callback` objects to use for training. These will be passed directly to the model.fit method.
+- `verbose : int (Default = 1)`
+The verbosity level to use for training. 1 is progress bar, 2 is one line per epoch, 0 is silent.
+- `proto_update_type : str (Default = 'average')`
+The type of prototype update to use. Options are 'average'. Only applies to domain_learner.
+- `proto_update_step_size : int (Default = None)`
+The number of batches used to update the prototypes. Only applies to domain_learner.
+- `mu : float (Default = 0.5)`
+The "mixing parameter" for the prototype update. 1.0 just uses the old prototype, 0.0 is full update. Only applies to domain_learner.
+- `warmup : int (Default = 0)`
+The number of epochs to train without semantic regularization. Only applies to domain_learner.
+- `log_experiment : bool (Default = False)`
+Whether to log the experiment to Comet ML. Requires that the `comet_info.json` file is properly configured.
+- `proto_plot_save_path : str (Default = None)`
+The path to save the prototype plots to. Only applies to domain_learner with 2D latent space.
+- `proto_plot_colors : list (Default = None)`
+A list of colors to use for the prototype plots. Only applies to domain_learner.
+- `proto_plot_legend : list (Default = None)`
+A list of strings to use for the legend in the prototype plots. Only applies to domain_learner.
+- `fixed_prototypes : bool (Default = False)`
+Whether to keep the prototypes fixed during training (i.e., not update them). Only applies to domain_learner.
 
 [(back to contents)](#contents)
 
 ### 5. Evaluating the Results
 
+After training the learner, there are several methods available for evaluating the results and visualizing what was learned. All evaluation methods begin with the prefix `eval_`. The available methods are described below.
+
+#### `eval_plot_loss_curves()`
+
+Plots the training and/or validation loss curves over the course of training.
+
+**Optional Arguments:**
+- `which : str (Default = 'both')`
+Which loss curves to plot. Options are 'training', 'validation', or 'both'.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_plot_loss_curves()
+```
+
+#### `eval_plot_accuracy_curves()`
+
+Plots the training and/or validation accuracy curves over the course of training. Only applicable if accuracy was included as a metric during compilation.
+
+**Optional Arguments:**
+- `which : str (Default = 'both')`
+Which accuracy curves to plot. Options are 'training', 'validation', or 'both'.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_plot_accuracy_curves()
+```
+
+#### `eval_compare_latent_prior()`
+
+Compares the learned latent space distribution to the prior distribution. Only applicable for variational autoencoder or variational domain_learner.
+
+**Optional Arguments:**
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_compare_latent_prior()
+```
+
+#### `eval_plot_scattered_features()`
+
+Plots the learned latent features in 2D or 3D space. This method is useful for visualizing how the encoder has learned to cluster different classes in the latent space. Only works if latent_dim is 2 or 3.
+
+**Optional Arguments:**
+- `which : str (Default = 'validation')`
+Which features to plot. Options are 'training' or 'validation'.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+- `colors : list (Default = None)`
+A list of colors to use for the different classes. If None, colors are automatically chosen.
+- `legend : list (Default = None)`
+A list of strings to use for the legend. If None, no legend is shown.
+
+**Example:**
+```python
+ctrl.eval_plot_scattered_features(colors=['red', 'blue'], legend=['Class 0', 'Class 1'])
+```
+
+#### `eval_show_decoded_protos()`
+
+Visualizes the decoded prototype representations. Only applicable for domain_learner.
+
+**Optional Arguments:**
+- `legend : list (Default = None)`
+A list of strings to use for the legend.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_show_decoded_protos()
+```
+
+#### `eval_plot_scattered_protos()`
+
+Plots the learned prototypes in the latent space. Only applicable for domain_learner with 2D or 3D latent space.
+
+**Optional Arguments:**
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+- `colors : list (Default = None)`
+A list of colors to use for the different prototypes.
+- `legend : list (Default = None)`
+A list of strings to use for the legend.
+
+**Example:**
+```python
+ctrl.eval_plot_scattered_protos()
+```
+
+#### `eval_compare_true_and_generated()`
+
+Compares the original input images with their reconstructions from the autoencoder or domain_learner. This method displays a grid of images showing the input and output side-by-side.
+
+**Optional Arguments:**
+- `number_of_samples : int (Default = 10)`
+The number of samples to display.
+- `which : str (Default = 'validation')`
+Which dataset to use. Options are 'training' or 'validation'.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_compare_true_and_generated(number_of_samples=5)
+```
+
+#### `eval_plot_similarity_heatmap()`
+
+Plots a heatmap showing the similarity between different classes in the learned conceptual space. Only applicable for domain_learner.
+
+**Optional Arguments:**
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_plot_similarity_heatmap()
+```
+
+#### `eval_visualize_dimension()`
+
+Visualizes how a single dimension of the latent space affects the reconstructed output. This method generates a series of images by varying one dimension while keeping others fixed.
+
+**Required Arguments:**
+- `dimension : int`
+The index of the dimension to visualize (0-indexed).
+
+**Optional Arguments:**
+- `number_of_steps : int (Default = 10)`
+The number of steps to take along the dimension.
+- `range_min : float (Default = -3.0)`
+The minimum value for the dimension.
+- `range_max : float (Default = 3.0)`
+The maximum value for the dimension.
+- `fixed_values : np.ndarray (Default = None)`
+The fixed values to use for the other dimensions. If None, zeros are used.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_visualize_dimension(dimension=0, number_of_steps=15)
+```
+
+#### `eval_visualize_all_dimensions()`
+
+Visualizes how all dimensions of the latent space affect the reconstructed output by calling `eval_visualize_dimension()` for each dimension.
+
+**Optional Arguments:**
+- `number_of_steps : int (Default = 10)`
+The number of steps to take along each dimension.
+- `range_min : float (Default = -3.0)`
+The minimum value for each dimension.
+- `range_max : float (Default = 3.0)`
+The maximum value for each dimension.
+- `fixed_values : np.ndarray (Default = None)`
+The fixed values to use for the other dimensions. If None, zeros are used.
+- `show : bool (Default = True)`
+Whether to show the plots.
+- `save_path : str (Default = None)`
+The base path to save the plots to. Each dimension will be saved with an appended index.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot windows are closed.
+
+**Example:**
+```python
+ctrl.eval_visualize_all_dimensions()
+```
+
+#### `eval_plot_similarity_histograms()`
+
+Plots histograms of the similarity values for each property in the domain_learner. Only applicable for domain_learner.
+
+**Optional Arguments:**
+- `which : str (Default = 'validation')`
+Which dataset to use. Options are 'training' or 'validation'.
+- `show : bool (Default = True)`
+Whether to show the plot.
+- `save_path : str (Default = None)`
+The path to save the plot to. If None, the plot is not saved.
+- `block : bool (Default = True)`
+Whether to block the execution until the plot window is closed.
+
+**Example:**
+```python
+ctrl.eval_plot_similarity_histograms()
+```
 
 [(back to contents)](#contents)
 
